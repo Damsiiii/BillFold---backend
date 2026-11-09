@@ -1,0 +1,240 @@
+transaction_id,transaction_date,description,amount,currency,transaction_type,category,source_dataset
+TXN-0002,2026-05-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0013,2026-05-01,Arpico Supercentre,12877.67,LKR,expense,Food,synthetic_mock_v1
+TXN-0032,2026-05-02,Lanka IOC Fuel Station,5104.66,LKR,expense,Transport,synthetic_mock_v1
+TXN-0008,2026-05-03,BreadTalk Pastry & Bakery,863.57,LKR,expense,Food,synthetic_mock_v1
+TXN-0009,2026-05-03,PickMe Food Delivery,2344.51,LKR,expense,Food,synthetic_mock_v1
+TXN-0033,2026-05-03,Uber Taxi Ride,2065.36,LKR,expense,Transport,synthetic_mock_v1
+TXN-0005,2026-05-05,CEB Electricity Bill,9607.55,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0039,2026-05-05,Colombo Comedy Club,2618.18,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0028,2026-05-06,Uber Taxi Ride,903.27,LKR,expense,Transport,synthetic_mock_v1
+TXN-0041,2026-05-06,Miniso Lifestyle,8746.6,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0026,2026-05-07,Lanka IOC Fuel Station,6307.28,LKR,expense,Transport,synthetic_mock_v1
+TXN-0022,2026-05-08,Uber Eats Restaurant Order,4752.71,LKR,expense,Food,synthetic_mock_v1
+TXN-0037,2026-05-08,Strikes Bowling Alley,5636.26,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0020,2026-05-10,Java Lounge Coffee,1954.7,LKR,expense,Food,synthetic_mock_v1
+TXN-0006,2026-05-11,NWSDB Water Supply Bill,2069.38,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0014,2026-05-11,Uber Eats Restaurant Order,2097.53,LKR,expense,Food,synthetic_mock_v1
+TXN-0007,2026-05-12,Dialog Home Broadband Bill,5562.82,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0017,2026-05-12,Uber Eats Restaurant Order,4182.81,LKR,expense,Food,synthetic_mock_v1
+TXN-0016,2026-05-13,Cargills Food City - Rajagiriya,1517.96,LKR,expense,Food,synthetic_mock_v1
+TXN-0024,2026-05-13,Uber Eats Restaurant Order,3050.91,LKR,expense,Food,synthetic_mock_v1
+TXN-0029,2026-05-13,Lanka IOC Fuel Station,7458.09,LKR,expense,Transport,synthetic_mock_v1
+TXN-0038,2026-05-14,Colombo Comedy Club,3865.18,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0004,2026-05-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0036,2026-05-15,PVR Cinemas One Galle Face,3418.45,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0035,2026-05-16,Ceypetco Fuel Station,7038.73,LKR,expense,Transport,synthetic_mock_v1
+TXN-0012,2026-05-19,Uber Eats Restaurant Order,4190.18,LKR,expense,Food,synthetic_mock_v1
+TXN-0034,2026-05-19,Lanka IOC Fuel Station,4350.51,LKR,expense,Transport,synthetic_mock_v1
+TXN-0010,2026-05-20,Keells Super - Havelock,11234.94,LKR,expense,Food,synthetic_mock_v1
+TXN-0030,2026-05-21,Uber Taxi Ride,1711.15,LKR,expense,Transport,synthetic_mock_v1
+TXN-0027,2026-05-22,PickMe Ride - Colombo,1594.15,LKR,expense,Transport,synthetic_mock_v1
+TXN-0011,2026-05-23,BreadTalk Pastry & Bakery,1240.88,LKR,expense,Food,synthetic_mock_v1
+TXN-0021,2026-05-23,Cargills Food City - Rajagiriya,891.65,LKR,expense,Food,synthetic_mock_v1
+TXN-0018,2026-05-24,Green Cabin Cafe,1872.46,LKR,expense,Food,synthetic_mock_v1
+TXN-0001,2026-05-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0025,2026-05-27,Java Lounge Coffee,1125.31,LKR,expense,Food,synthetic_mock_v1
+TXN-0031,2026-05-27,PickMe Ride - Colombo,1005.02,LKR,expense,Transport,synthetic_mock_v1
+TXN-0003,2026-05-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0023,2026-05-28,PickMe Food Delivery,4372.75,LKR,expense,Food,synthetic_mock_v1
+TXN-0040,2026-05-28,ODEL Flagship Store,4621.42,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0019,2026-05-30,BreadTalk Pastry & Bakery,957.6,LKR,expense,Food,synthetic_mock_v1
+TXN-0015,2026-05-31,Java Lounge Coffee,1004.42,LKR,expense,Food,synthetic_mock_v1
+TXN-0043,2026-06-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0070,2026-06-01,PickMe Ride - Colombo,1747.15,LKR,expense,Transport,synthetic_mock_v1
+TXN-0071,2026-06-02,Uber Taxi Ride,754.47,LKR,expense,Transport,synthetic_mock_v1
+TXN-0072,2026-06-02,Lanka IOC Fuel Station,3783.43,LKR,expense,Transport,synthetic_mock_v1
+TXN-0054,2026-06-04,Uber Eats Restaurant Order,4293.34,LKR,expense,Food,synthetic_mock_v1
+TXN-0077,2026-06-04,Miniso Lifestyle,6494.97,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0051,2026-06-06,Green Cabin Cafe,806.49,LKR,expense,Food,synthetic_mock_v1
+TXN-0046,2026-06-08,CEB Electricity Bill,11140.96,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0060,2026-06-08,Cargills Food City - Rajagiriya,971.31,LKR,expense,Food,synthetic_mock_v1
+TXN-0068,2026-06-08,PickMe Ride - Colombo,1174.03,LKR,expense,Transport,synthetic_mock_v1
+TXN-0073,2026-06-08,Lanka IOC Fuel Station,6175.91,LKR,expense,Transport,synthetic_mock_v1
+TXN-0048,2026-06-11,Dialog Home Broadband Bill,5512.26,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0050,2026-06-11,Cargills Food City - Rajagiriya,1387.0,LKR,expense,Food,synthetic_mock_v1
+TXN-0047,2026-06-12,NWSDB Water Supply Bill,2382.03,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0059,2026-06-12,Uber Eats Restaurant Order,2366.25,LKR,expense,Food,synthetic_mock_v1
+TXN-0066,2026-06-13,Lanka IOC Fuel Station,5252.4,LKR,expense,Transport,synthetic_mock_v1
+TXN-0078,2026-06-14,Miniso Lifestyle,11233.68,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0045,2026-06-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0058,2026-06-16,Keells Super - Havelock,5842.41,LKR,expense,Food,synthetic_mock_v1
+TXN-0061,2026-06-16,Cargills Food City - Rajagiriya,2755.97,LKR,expense,Food,synthetic_mock_v1
+TXN-0055,2026-06-17,PickMe Food Delivery,2089.09,LKR,expense,Food,synthetic_mock_v1
+TXN-0067,2026-06-17,Ceypetco Fuel Station,3984.02,LKR,expense,Transport,synthetic_mock_v1
+TXN-0062,2026-06-18,Arpico Supercentre,6040.7,LKR,expense,Food,synthetic_mock_v1
+TXN-0063,2026-06-18,Uber Taxi Ride,1060.84,LKR,expense,Transport,synthetic_mock_v1
+TXN-0074,2026-06-18,PVR Cinemas One Galle Face,5527.42,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0069,2026-06-19,Uber Taxi Ride,1562.08,LKR,expense,Transport,synthetic_mock_v1
+TXN-0049,2026-06-22,Uber Eats Restaurant Order,4059.52,LKR,expense,Food,synthetic_mock_v1
+TXN-0052,2026-06-24,Uber Eats Restaurant Order,4710.04,LKR,expense,Food,synthetic_mock_v1
+TXN-0042,2026-06-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0053,2026-06-25,Arpico Supercentre,10592.18,LKR,expense,Food,synthetic_mock_v1
+TXN-0056,2026-06-25,Arpico Supercentre,10972.55,LKR,expense,Food,synthetic_mock_v1
+TXN-0057,2026-06-25,Keells Super - Havelock,11687.34,LKR,expense,Food,synthetic_mock_v1
+TXN-0076,2026-06-26,Miniso Lifestyle,4970.81,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0044,2026-06-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0064,2026-06-28,Ceypetco Fuel Station,7357.45,LKR,expense,Transport,synthetic_mock_v1
+TXN-0075,2026-06-29,Colombo Comedy Club,3317.79,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0065,2026-06-30,Uber Taxi Ride,1755.07,LKR,expense,Transport,synthetic_mock_v1
+TXN-0080,2026-07-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0095,2026-07-01,BreadTalk Pastry & Bakery,1330.41,LKR,expense,Food,synthetic_mock_v1
+TXN-0100,2026-07-02,Ceypetco Fuel Station,5511.4,LKR,expense,Transport,synthetic_mock_v1
+TXN-0106,2026-07-02,PickMe Ride - Colombo,1299.8,LKR,expense,Transport,synthetic_mock_v1
+TXN-0103,2026-07-03,PickMe Ride - Colombo,1696.58,LKR,expense,Transport,synthetic_mock_v1
+TXN-0083,2026-07-05,CEB Electricity Bill,12395.47,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0086,2026-07-08,PickMe Food Delivery,2208.67,LKR,expense,Food,synthetic_mock_v1
+TXN-0104,2026-07-08,Ceypetco Fuel Station,3979.55,LKR,expense,Transport,synthetic_mock_v1
+TXN-0084,2026-07-09,NWSDB Water Supply Bill,1866.67,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0088,2026-07-09,Green Cabin Cafe,1299.61,LKR,expense,Food,synthetic_mock_v1
+TXN-0098,2026-07-10,PickMe Food Delivery,4699.87,LKR,expense,Food,synthetic_mock_v1
+TXN-0085,2026-07-13,Dialog Home Broadband Bill,5620.53,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0094,2026-07-13,Keells Super - Havelock,6475.65,LKR,expense,Food,synthetic_mock_v1
+TXN-0109,2026-07-13,PVR Cinemas One Galle Face,5289.78,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0082,2026-07-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0087,2026-07-15,Arpico Supercentre,9562.58,LKR,expense,Food,synthetic_mock_v1
+TXN-0110,2026-07-15,Cotton Collection,11839.87,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0093,2026-07-16,Green Cabin Cafe,1227.49,LKR,expense,Food,synthetic_mock_v1
+TXN-0102,2026-07-17,PickMe Ride - Colombo,1969.58,LKR,expense,Transport,synthetic_mock_v1
+TXN-0091,2026-07-18,Keells Super - Havelock,16127.96,LKR,expense,Food,synthetic_mock_v1
+TXN-0099,2026-07-19,Keells Super - Havelock,13475.71,LKR,expense,Food,synthetic_mock_v1
+TXN-0107,2026-07-19,Lanka IOC Fuel Station,7238.83,LKR,expense,Transport,synthetic_mock_v1
+TXN-0112,2026-07-20,ODEL Flagship Store,3881.32,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0238,2026-07-20,Boutique Gift Shop Cash Sale,3850.0,LKR,expense,,synthetic_mock_v1
+TXN-0108,2026-07-22,Strikes Bowling Alley,3297.96,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0097,2026-07-23,Green Cabin Cafe,1109.59,LKR,expense,Food,synthetic_mock_v1
+TXN-0079,2026-07-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0096,2026-07-26,Green Cabin Cafe,1370.5,LKR,expense,Food,synthetic_mock_v1
+TXN-0081,2026-07-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0090,2026-07-28,Cargills Food City - Rajagiriya,901.18,LKR,expense,Food,synthetic_mock_v1
+TXN-0101,2026-07-28,Uber Taxi Ride,738.16,LKR,expense,Transport,synthetic_mock_v1
+TXN-0105,2026-07-29,Uber Taxi Ride,1547.32,LKR,expense,Transport,synthetic_mock_v1
+TXN-0089,2026-07-30,Cargills Food City - Rajagiriya,1686.26,LKR,expense,Food,synthetic_mock_v1
+TXN-0092,2026-07-30,PickMe Food Delivery,2132.2,LKR,expense,Food,synthetic_mock_v1
+TXN-0111,2026-07-30,ODEL Flagship Store,3286.63,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0114,2026-08-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0144,2026-08-01,Uber Taxi Ride,1791.67,LKR,expense,Transport,synthetic_mock_v1
+TXN-0137,2026-08-02,Lanka IOC Fuel Station,4958.61,LKR,expense,Transport,synthetic_mock_v1
+TXN-0148,2026-08-02,Colombo Comedy Club,3223.2,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0124,2026-08-04,Arpico Supercentre,7673.59,LKR,expense,Food,synthetic_mock_v1
+TXN-0134,2026-08-04,Cargills Food City - Rajagiriya,2690.1,LKR,expense,Food,synthetic_mock_v1
+TXN-0126,2026-08-05,Uber Eats Restaurant Order,2501.62,LKR,expense,Food,synthetic_mock_v1
+TXN-0117,2026-08-06,CEB Electricity Bill,11675.3,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0127,2026-08-07,Java Lounge Coffee,1207.19,LKR,expense,Food,synthetic_mock_v1
+TXN-0139,2026-08-07,Uber Taxi Ride,1683.75,LKR,expense,Transport,synthetic_mock_v1
+TXN-0142,2026-08-08,Uber Taxi Ride,2163.12,LKR,expense,Transport,synthetic_mock_v1
+TXN-0150,2026-08-08,ODEL Flagship Store,9338.31,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0129,2026-08-09,Keells Super - Havelock,5607.58,LKR,expense,Food,synthetic_mock_v1
+TXN-0132,2026-08-09,Arpico Supercentre,13394.77,LKR,expense,Food,synthetic_mock_v1
+TXN-0118,2026-08-10,NWSDB Water Supply Bill,2826.59,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0120,2026-08-10,Arpico Supercentre,9758.21,LKR,expense,Food,synthetic_mock_v1
+TXN-0119,2026-08-11,Dialog Home Broadband Bill,5691.34,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0131,2026-08-11,Arpico Supercentre,12145.36,LKR,expense,Food,synthetic_mock_v1
+TXN-0145,2026-08-11,Ceypetco Fuel Station,6708.94,LKR,expense,Transport,synthetic_mock_v1
+TXN-0140,2026-08-12,Ceypetco Fuel Station,7395.35,LKR,expense,Transport,synthetic_mock_v1
+TXN-0151,2026-08-13,Cotton Collection,5791.01,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0130,2026-08-14,Uber Eats Restaurant Order,1741.08,LKR,expense,Food,synthetic_mock_v1
+TXN-0236,2026-08-14,Ministry of Crab Seafood Dinner,14500.0,LKR,expense,Food,synthetic_mock_v1
+TXN-0116,2026-08-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0237,2026-08-15,Ministry of Crab Seafood Dinner,14500.0,LKR,expense,Food,synthetic_mock_v1
+TXN-0121,2026-08-18,Uber Eats Restaurant Order,3557.37,LKR,expense,Food,synthetic_mock_v1
+TXN-0123,2026-08-18,Uber Eats Restaurant Order,4581.62,LKR,expense,Food,synthetic_mock_v1
+TXN-0133,2026-08-18,BreadTalk Pastry & Bakery,1921.81,LKR,expense,Food,synthetic_mock_v1
+TXN-0136,2026-08-19,Uber Taxi Ride,1316.17,LKR,expense,Transport,synthetic_mock_v1
+TXN-0128,2026-08-21,Uber Eats Restaurant Order,3217.31,LKR,expense,Food,synthetic_mock_v1
+TXN-0239,2026-08-22,Pending Bank Fee Hold,500.0,LKR,unknown,Other,synthetic_mock_v1
+TXN-0135,2026-08-23,Arpico Supercentre,11047.08,LKR,expense,Food,synthetic_mock_v1
+TXN-0141,2026-08-24,Uber Taxi Ride,2084.93,LKR,expense,Transport,synthetic_mock_v1
+TXN-0113,2026-08-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0122,2026-08-26,Keells Super - Havelock,12514.36,LKR,expense,Food,synthetic_mock_v1
+TXN-0143,2026-08-26,Uber Taxi Ride,2016.2,LKR,expense,Transport,synthetic_mock_v1
+TXN-0146,2026-08-26,PVR Cinemas One Galle Face,3427.31,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0147,2026-08-26,Scope Cinemas - Colombo City Centre,3959.69,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0149,2026-08-27,Colombo Comedy Club,3808.43,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0115,2026-08-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0125,2026-08-29,Cargills Food City - Rajagiriya,2284.83,LKR,expense,Food,synthetic_mock_v1
+TXN-0138,2026-08-30,PickMe Ride - Colombo,2043.33,LKR,expense,Transport,synthetic_mock_v1
+TXN-0153,2026-09-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0176,2026-09-01,Uber Eats Restaurant Order,2518.12,LKR,expense,Food,synthetic_mock_v1
+TXN-0183,2026-09-02,Uber Taxi Ride,2175.1,LKR,expense,Transport,synthetic_mock_v1
+TXN-0168,2026-09-03,Java Lounge Coffee,2046.31,LKR,expense,Food,synthetic_mock_v1
+TXN-0156,2026-09-05,CEB Electricity Bill,13657.62,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0187,2026-09-05,PickMe Ride - Colombo,2033.62,LKR,expense,Transport,synthetic_mock_v1
+TXN-0182,2026-09-08,Uber Taxi Ride,878.4,LKR,expense,Transport,synthetic_mock_v1
+TXN-0160,2026-09-09,Arpico Supercentre,11467.08,LKR,expense,Food,synthetic_mock_v1
+TXN-0161,2026-09-09,Keells Super - Havelock,5800.83,LKR,expense,Food,synthetic_mock_v1
+TXN-0170,2026-09-10,Uber Eats Restaurant Order,3734.06,LKR,expense,Food,synthetic_mock_v1
+TXN-0175,2026-09-10,BreadTalk Pastry & Bakery,1895.87,LKR,expense,Food,synthetic_mock_v1
+TXN-0180,2026-09-10,Lanka IOC Fuel Station,3873.55,LKR,expense,Transport,synthetic_mock_v1
+TXN-0157,2026-09-11,NWSDB Water Supply Bill,2186.26,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0159,2026-09-11,Keells Super - Havelock,5884.1,LKR,expense,Food,synthetic_mock_v1
+TXN-0163,2026-09-11,BreadTalk Pastry & Bakery,2012.42,LKR,expense,Food,synthetic_mock_v1
+TXN-0171,2026-09-11,BreadTalk Pastry & Bakery,2194.42,LKR,expense,Food,synthetic_mock_v1
+TXN-0186,2026-09-13,Ceypetco Fuel Station,5098.61,LKR,expense,Transport,synthetic_mock_v1
+TXN-0158,2026-09-14,Dialog Home Broadband Bill,5511.57,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0162,2026-09-14,Java Lounge Coffee,2257.09,LKR,expense,Food,synthetic_mock_v1
+TXN-0155,2026-09-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0178,2026-09-15,Uber Taxi Ride,1442.32,LKR,expense,Transport,synthetic_mock_v1
+TXN-0164,2026-09-17,Cargills Food City - Rajagiriya,1570.39,LKR,expense,Food,synthetic_mock_v1
+TXN-0172,2026-09-18,Arpico Supercentre,6802.08,LKR,expense,Food,synthetic_mock_v1
+TXN-0235,2026-09-18,SriLankan Airlines First Class Flight Booking,485000.0,LKR,expense,Transport,synthetic_mock_v1
+TXN-0165,2026-09-19,PickMe Food Delivery,2415.11,LKR,expense,Food,synthetic_mock_v1
+TXN-0184,2026-09-20,PickMe Ride - Colombo,1355.9,LKR,expense,Transport,synthetic_mock_v1
+TXN-0169,2026-09-22,Cargills Food City - Rajagiriya,2239.51,LKR,expense,Food,synthetic_mock_v1
+TXN-0173,2026-09-22,BreadTalk Pastry & Bakery,2154.64,LKR,expense,Food,synthetic_mock_v1
+TXN-0166,2026-09-23,BreadTalk Pastry & Bakery,803.38,LKR,expense,Food,synthetic_mock_v1
+TXN-0152,2026-09-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0181,2026-09-25,Uber Taxi Ride,1692.83,LKR,expense,Transport,synthetic_mock_v1
+TXN-0188,2026-09-25,Colombo Comedy Club,3206.67,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0177,2026-09-26,Lanka IOC Fuel Station,5359.95,LKR,expense,Transport,synthetic_mock_v1
+TXN-0179,2026-09-26,Uber Taxi Ride,1671.22,LKR,expense,Transport,synthetic_mock_v1
+TXN-0189,2026-09-26,Colombo Comedy Club,2431.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0191,2026-09-26,Miniso Lifestyle,9408.47,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0154,2026-09-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0174,2026-09-29,Arpico Supercentre,11886.18,LKR,expense,Food,synthetic_mock_v1
+TXN-0185,2026-09-29,Uber Taxi Ride,1763.44,LKR,expense,Transport,synthetic_mock_v1
+TXN-0167,2026-09-30,PickMe Food Delivery,2765.51,LKR,expense,Food,synthetic_mock_v1
+TXN-0190,2026-09-30,ODEL Flagship Store,7445.09,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0193,2026-10-01,Apartment Rental Payment,65000.0,LKR,expense,Rent,synthetic_mock_v1
+TXN-0226,2026-10-03,Ceypetco Fuel Station,3577.53,LKR,expense,Transport,synthetic_mock_v1
+TXN-0231,2026-10-04,ODEL Department Store - Wardrobe Refresh,68500.0,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0222,2026-10-06,PickMe Ride - Colombo,1053.24,LKR,expense,Transport,synthetic_mock_v1
+TXN-0196,2026-10-07,CEB Electricity Bill,13585.17,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0201,2026-10-08,Uber Eats Restaurant Order,4050.6,LKR,expense,Food,synthetic_mock_v1
+TXN-0206,2026-10-08,BreadTalk Pastry & Bakery,2187.9,LKR,expense,Food,synthetic_mock_v1
+TXN-0228,2026-10-08,Scope Cinemas - Colombo City Centre,5793.67,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0203,2026-10-09,Green Cabin Cafe,954.97,LKR,expense,Food,synthetic_mock_v1
+TXN-0216,2026-10-09,BreadTalk Pastry & Bakery,1771.28,LKR,expense,Food,synthetic_mock_v1
+TXN-0204,2026-10-10,PickMe Food Delivery,2469.49,LKR,expense,Food,synthetic_mock_v1
+TXN-0205,2026-10-11,Cargills Food City - Rajagiriya,1076.75,LKR,expense,Food,synthetic_mock_v1
+TXN-0217,2026-10-11,Ceypetco Fuel Station,6396.73,LKR,expense,Transport,synthetic_mock_v1
+TXN-0223,2026-10-11,Uber Taxi Ride,1354.78,LKR,expense,Transport,synthetic_mock_v1
+TXN-0224,2026-10-11,Ceypetco Fuel Station,4613.03,LKR,expense,Transport,synthetic_mock_v1
+TXN-0232,2026-10-11,Glitz Luxury Perfumes & Watches,45000.0,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0197,2026-10-12,NWSDB Water Supply Bill,2473.92,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0214,2026-10-13,BreadTalk Pastry & Bakery,1876.44,LKR,expense,Food,synthetic_mock_v1
+TXN-0198,2026-10-14,Dialog Home Broadband Bill,5647.51,LKR,expense,Utilities,synthetic_mock_v1
+TXN-0208,2026-10-14,Java Lounge Coffee,1885.22,LKR,expense,Food,synthetic_mock_v1
+TXN-0209,2026-10-14,Keells Super - Havelock,6982.01,LKR,expense,Food,synthetic_mock_v1
+TXN-0210,2026-10-14,BreadTalk Pastry & Bakery,2609.68,LKR,expense,Food,synthetic_mock_v1
+TXN-0221,2026-10-14,Uber Taxi Ride,1993.62,LKR,expense,Transport,synthetic_mock_v1
+TXN-0195,2026-10-15,Netflix Monthly Subscription,2200.0,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0199,2026-10-15,Arpico Supercentre,13423.87,LKR,expense,Food,synthetic_mock_v1
+TXN-0200,2026-10-16,Green Cabin Cafe,1318.38,LKR,expense,Food,synthetic_mock_v1
+TXN-0202,2026-10-17,Green Cabin Cafe,2053.5,LKR,expense,Food,synthetic_mock_v1
+TXN-0227,2026-10-18,PickMe Ride - Colombo,2199.86,LKR,expense,Transport,synthetic_mock_v1
+TXN-0211,2026-10-19,Keells Super - Havelock,14780.78,LKR,expense,Food,synthetic_mock_v1
+TXN-0220,2026-10-19,PickMe Ride - Colombo,780.12,LKR,expense,Transport,synthetic_mock_v1
+TXN-0233,2026-10-19,Singer Mega - Home Appliance Upgrade,52000.0,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0219,2026-10-20,PickMe Ride - Colombo,2055.74,LKR,expense,Transport,synthetic_mock_v1
+TXN-0229,2026-10-21,Scope Cinemas - Colombo City Centre,5669.47,LKR,expense,Entertainment,synthetic_mock_v1
+TXN-0207,2026-10-23,PickMe Food Delivery,1805.53,LKR,expense,Food,synthetic_mock_v1
+TXN-0215,2026-10-24,PickMe Food Delivery,3162.33,LKR,expense,Food,synthetic_mock_v1
+TXN-0234,2026-10-24,Daraz Online Shopping - Electronics & Gear,24500.0,LKR,expense,Shopping,synthetic_mock_v1
+TXN-0192,2026-10-25,Monthly Salary - Tech Lead,275000.0,LKR,income,Salary,synthetic_mock_v1
+TXN-0212,2026-10-25,BreadTalk Pastry & Bakery,1753.96,LKR,expense,Food,synthetic_mock_v1
+TXN-0218,2026-10-27,Ceypetco Fuel Station,7178.17,LKR,expense,Transport,synthetic_mock_v1
+TXN-0194,2026-10-28,Transfer to High-Yield Savings Pot,35000.0,LKR,transfer,Transfer,synthetic_mock_v1
+TXN-0213,2026-10-31,Java Lounge Coffee,1397.23,LKR,expense,Food,synthetic_mock_v1
+TXN-0225,2026-10-31,Ceypetco Fuel Station,4509.09,LKR,expense,Transport,synthetic_mock_v1
+TXN-0230,2026-10-31,PVR Cinemas One Galle Face,3117.06,LKR,expense,Entertainment,synthetic_mock_v1
