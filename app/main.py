@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -9,7 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.chatbot import router as chatbot_router
-from app.api.integrations import router as integrations_router
+from app.api.integrations import (
+    expire_stale_ocr_jobs,
+    router as integrations_router,
+)
 from app.database.database import init_db
 
 # Load environment variables from .env
@@ -25,7 +29,25 @@ logger = logging.getLogger("backend")
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
-    yield
+    expire_stale_ocr_jobs()
+    stale_job_monitor = asyncio.create_task(_monitor_stale_ocr_jobs())
+    try:
+        yield
+    finally:
+        stale_job_monitor.cancel()
+        try:
+            await stale_job_monitor
+        except asyncio.CancelledError:
+            pass
+
+
+async def _monitor_stale_ocr_jobs() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(expire_stale_ocr_jobs)
+        except Exception:
+            logger.exception("Stale statement-job monitor iteration failed")
+        await asyncio.sleep(30)
 
 
 app = FastAPI(

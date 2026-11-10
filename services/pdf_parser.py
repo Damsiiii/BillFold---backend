@@ -4,11 +4,19 @@ Extracts and normalizes transaction data from PDF bank statements using pdfplumb
 Supports both table-structured layouts and formatted text layouts, multi-page statements,
 scanned PDF detection, and safe handling of unreadable or encrypted files.
 """
-from typing import Any, Dict, List, Optional, Tuple, Union, BinaryIO
+from functools import lru_cache
+from contextvars import ContextVar
+from collections import Counter
+import logging
+import math
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, BinaryIO
 from pathlib import Path
 import io
 import re
-import shutil
+
+import numpy as np
 import pdfplumber
 import pypdf
 
@@ -68,6 +76,50 @@ CATEGORY_KEYWORDS = [
 CURRENCY_KEYWORDS = [
     "currency", "curr", "ccy"
 ]
+
+logger = logging.getLogger(__name__)
+ocr_stage_callback: ContextVar[
+    Optional[Callable[[str, Optional[int], Optional[float]], None]]
+] = ContextVar(
+    "ocr_stage_callback", default=None
+)
+OCR_DPI = 150
+MAX_OCR_PAGE_PIXELS = 8_000_000
+
+
+def _page_needs_ocr(page: Any) -> bool:
+    if not page.images:
+        return False
+    try:
+        text = page.extract_text() or ""
+    except Exception:
+        logger.debug("Could not inspect extracted text on a PDF page", exc_info=True)
+        return True
+    return len(re.sub(r"\W", "", text)) < 40
+
+
+def _record_ocr_stage(
+    stage: str,
+    page_number: Optional[int] = None,
+    elapsed_seconds: Optional[float] = None,
+) -> None:
+    callback = ocr_stage_callback.get()
+    if callback is not None:
+        callback(stage, page_number, elapsed_seconds)
+
+
+@lru_cache(maxsize=1)
+def _get_ocr_engine():
+    from paddleocr import PaddleOCR
+
+    return PaddleOCR(
+        lang="en",
+        use_doc_orientation_classify=True,
+        use_doc_unwarping=True,
+        use_textline_orientation=True,
+        enable_mkldnn=False,
+        cpu_threads=min(4, os.cpu_count() or 1),
+    )
 
 
 class PDFParser:
@@ -138,6 +190,14 @@ class PDFParser:
                     warnings=warnings,
                     error="PDF file is password protected. Please remove password encryption before uploading."
                 )
+            if any(page.rotation for page in reader.pages):
+                normalized_writer = pypdf.PdfWriter(clone_from=reader)
+                for page in normalized_writer.pages:
+                    if page.rotation:
+                        page.transfer_rotation_to_content()
+                normalized_bytes = io.BytesIO()
+                normalized_writer.write(normalized_bytes)
+                raw_bytes = normalized_bytes.getvalue()
         except Exception as e:
             return ExtractionResult(
                 success=False,
@@ -175,36 +235,33 @@ class PDFParser:
                     error="PDF document contains no pages."
                 )
 
-            # Check for scanned PDF (empty text but images exist)
+            # Keep page-level text and image information so mixed scans are OCRed too.
             all_text_chunks: List[str] = []
-            total_images = 0
-            for page in pdf.pages:
-                text = page.extract_text() or ""
-                all_text_chunks.append(text)
-                total_images += len(page.images)
+            ocr_pages: List[Tuple[int, Any]] = []
+            try:
+                for page_number, page in enumerate(pdf.pages, start=1):
+                    text = page.extract_text() or ""
+                    all_text_chunks.append(text)
+                    if _page_needs_ocr(page):
+                        ocr_pages.append((page_number, page))
+            except Exception as exc:
+                return ExtractionResult(
+                    success=False,
+                    filename=filename,
+                    file_type="pdf",
+                    total_transactions=0,
+                    transactions=[],
+                    warnings=warnings,
+                    error=f"Could not read PDF page content: {exc}",
+                )
 
             full_text = "\n".join(all_text_chunks).strip()
 
             if not full_text:
-                if total_images > 0:
-                    # Scanned PDF detected
-                    if self._is_ocr_available():
-                        # OCR hook if configured in environment
-                        return self._attempt_ocr_extraction(pdf, filename, dayfirst)
-                    else:
-                        return ExtractionResult(
-                            success=False,
-                            filename=filename,
-                            file_type="pdf",
-                            total_transactions=0,
-                            transactions=[],
-                            warnings=warnings,
-                            error=(
-                                "Scanned PDF detected. Optical Character Recognition (OCR) "
-                                "is not configured in this environment. Please upload a "
-                                "digital/text-based statement or convert it to CSV/XLSX."
-                            )
-                        )
+                if ocr_pages:
+                    return self._attempt_ocr_extraction(
+                        pdf, filename, dayfirst, pages=ocr_pages
+                    )
                 else:
                     return ExtractionResult(
                         success=False,
@@ -225,14 +282,44 @@ class PDFParser:
                 pdf, filename, global_currency, dayfirst
             )
 
-            # 2. If table extraction yielded no transactions, fall back to line-based text parsing
-            if not transactions:
-                transactions, line_warnings = self._extract_from_text(
-                    all_text_chunks, filename, global_currency, dayfirst
+            # Use coordinates for unruled tables and varied column positions.
+            positioned_words = [
+                page.extract_words(x_tolerance=2, y_tolerance=3)
+                for page in pdf.pages
+            ]
+            positioned_transactions, positioned_warnings = (
+                self._extract_from_positioned_words(
+                    positioned_words, filename, global_currency, dayfirst
                 )
-                warnings.extend(line_warnings)
-            else:
-                warnings.extend(table_warnings)
+            )
+            line_transactions, line_warnings = self._extract_from_text(
+                all_text_chunks, filename, global_currency, dayfirst
+            )
+            transactions = self._merge_transactions(
+                transactions, positioned_transactions, line_transactions
+            )
+            warnings.extend(table_warnings)
+            warnings.extend(positioned_warnings)
+            warnings.extend(line_warnings)
+
+            if ocr_pages:
+                ocr_result = self._attempt_ocr_extraction(
+                    pdf,
+                    filename,
+                    dayfirst,
+                    pages=ocr_pages,
+                    allow_empty=True,
+                )
+                if ocr_result.success:
+                    transactions = self._merge_transactions(
+                        transactions, ocr_result.transactions
+                    )
+                    warnings.extend(ocr_result.warnings)
+                else:
+                    warnings.append(
+                        "OCR could not read one or more scanned pages; readable PDF text "
+                        "was still processed."
+                    )
 
         if not transactions:
             warnings.append("No valid transaction records could be extracted from this PDF statement.")
@@ -358,14 +445,35 @@ class PDFParser:
         warnings: List[str] = []
 
         active_col_mapping: Optional[Dict[str, int]] = None
-        all_table_data_rows: List[List[Any]] = []
+        all_table_data_rows: List[Tuple[List[Any], Dict[str, int]]] = []
 
         for page in pdf.pages:
-            tables = page.extract_tables()
-            if not tables:
-                continue
+            try:
+                found_tables = page.extract_tables() or []
+            except Exception:
+                logger.debug("PDF ruled-table extraction failed on a page", exc_info=True)
+                found_tables = []
+            has_header = any(
+                self._has_transaction_headers(row)
+                for table in found_tables
+                for row in table
+            )
+            if not has_header:
+                try:
+                    found_tables = page.extract_tables(
+                        table_settings={
+                            "vertical_strategy": "text",
+                            "horizontal_strategy": "text",
+                            "intersection_tolerance": 5,
+                            "min_words_vertical": 2,
+                            "min_words_horizontal": 1,
+                        }
+                    ) or []
+                except Exception:
+                    logger.debug("PDF text-table extraction failed on a page", exc_info=True)
+                    found_tables = []
 
-            for table in tables:
+            for table in found_tables:
                 if not table:
                     continue
 
@@ -381,14 +489,17 @@ class PDFParser:
                         continue
 
                     if active_col_mapping:
-                        all_table_data_rows.append(row)
+                        all_table_data_rows.append((row, active_col_mapping.copy()))
 
         if not active_col_mapping or not all_table_data_rows:
             return [], warnings
 
         # Infer date convention across table rows
-        date_col = active_col_mapping["date"]
-        raw_dates = [r[date_col] for r in all_table_data_rows if len(r) > date_col and r[date_col]]
+        raw_dates = [
+            row[mapping["date"]]
+            for row, mapping in all_table_data_rows
+            if len(row) > mapping["date"] and row[mapping["date"]]
+        ]
 
         resolved_dayfirst, date_warnings = infer_date_convention(
             raw_dates=raw_dates,
@@ -397,22 +508,23 @@ class PDFParser:
         )
         warnings.extend(date_warnings)
 
-        desc_col = active_col_mapping.get("description")
-        debit_col = active_col_mapping.get("debit")
-        credit_col = active_col_mapping.get("credit")
-        amount_col = active_col_mapping.get("amount")
-        balance_col = active_col_mapping.get("balance")
-        type_col = active_col_mapping.get("type")
-        cat_col = active_col_mapping.get("category")
-        curr_col = active_col_mapping.get("currency")
-
         skipped_rows = 0
 
-        for row_idx, row in enumerate(all_table_data_rows):
+        for row_idx, (row, col_mapping) in enumerate(all_table_data_rows):
             def get_cell(idx: Optional[int]) -> Any:
                 if idx is not None and 0 <= idx < len(row):
                     return row[idx]
                 return None
+
+            date_col = col_mapping["date"]
+            desc_col = col_mapping.get("description")
+            debit_col = col_mapping.get("debit")
+            credit_col = col_mapping.get("credit")
+            amount_col = col_mapping.get("amount")
+            balance_col = col_mapping.get("balance")
+            type_col = col_mapping.get("type")
+            cat_col = col_mapping.get("category")
+            curr_col = col_mapping.get("currency")
 
             raw_date = get_cell(date_col)
             normalized_dt = normalize_date(raw_date, dayfirst=resolved_dayfirst)
@@ -484,6 +596,247 @@ class PDFParser:
 
         return transactions, warnings
 
+    def _has_transaction_headers(self, row: List[Any]) -> bool:
+        mapping, _ = self._score_headers(row)
+        return "date" in mapping and any(
+            column in mapping for column in ("amount", "debit", "credit")
+        )
+
+    @staticmethod
+    def _merge_transactions(
+        *transaction_groups: List[Transaction],
+    ) -> List[Transaction]:
+        merged: List[Transaction] = []
+        prior_exact_counts: Counter[
+            Tuple[str, str, float, str, Optional[str]]
+        ] = Counter()
+        prior_overlap_counts: Counter[
+            Tuple[str, str, float, Optional[str]]
+        ] = Counter()
+        reference_directions: Dict[
+            Tuple[str, str, float, Optional[str]], set[str]
+        ] = {}
+        for group in transaction_groups:
+            current_group_counts: Counter[
+                Tuple[str, str, float, str, Optional[str]]
+            ] = Counter()
+            current_overlap_counts: Counter[
+                Tuple[str, str, float, Optional[str]]
+            ] = Counter()
+            current_directions: Dict[
+                Tuple[str, str, float, Optional[str]], set[str]
+            ] = {}
+            for transaction in group:
+                overlap_key = (
+                    transaction.transaction_date,
+                    transaction.description.casefold(),
+                    round(transaction.amount, 2),
+                    transaction.currency.upper() if transaction.currency else None,
+                )
+                direction = transaction.transaction_type.casefold()
+                key = (*overlap_key[:3], direction, overlap_key[3])
+                current_group_counts[key] += 1
+                current_overlap_counts[overlap_key] += 1
+                current_directions.setdefault(overlap_key, set()).add(direction)
+            processed_counts: Counter[
+                Tuple[str, str, float, str, Optional[str]]
+            ] = Counter()
+            processed_overlap_counts: Counter[
+                Tuple[str, str, float, Optional[str]]
+            ] = Counter()
+            for transaction in group:
+                overlap_key = (
+                    transaction.transaction_date,
+                    transaction.description.casefold(),
+                    round(transaction.amount, 2),
+                    transaction.currency.upper() if transaction.currency else None,
+                )
+                direction = transaction.transaction_type.casefold()
+                key = (*overlap_key[:3], direction, overlap_key[3])
+                processed_counts[key] += 1
+                processed_overlap_counts[overlap_key] += 1
+                conflicting_strategy_match = (
+                    processed_overlap_counts[overlap_key]
+                    <= prior_overlap_counts[overlap_key]
+                    and len(reference_directions.get(overlap_key, ())) == 1
+                    and len(current_directions[overlap_key]) == 1
+                    and direction not in reference_directions[overlap_key]
+                )
+                # Only collapse matching rows across extraction strategies. Keep
+                # repeated occurrences within a strategy and preserve debit/credit
+                # collisions as distinct transaction identities.
+                if (
+                    processed_counts[key] > prior_exact_counts[key]
+                    and not conflicting_strategy_match
+                ):
+                    merged.append(transaction)
+            for key, count in current_group_counts.items():
+                prior_exact_counts[key] = max(prior_exact_counts[key], count)
+            for key, count in current_overlap_counts.items():
+                prior_overlap_counts[key] = max(prior_overlap_counts[key], count)
+                reference_directions.setdefault(key, current_directions[key])
+        return merged
+
+    def _header_column_centers(
+        self, words: List[Dict[str, Any]]
+    ) -> Dict[str, float]:
+        columns: Dict[str, float] = {}
+        index = 0
+        while index < len(words):
+            best_match: Optional[Tuple[int, str]] = None
+            for end in range(index, min(index + 4, len(words))):
+                if end > index:
+                    gap = float(words[end]["x0"]) - float(words[end - 1]["x1"])
+                    word_height = float(words[end]["bottom"]) - float(words[end]["top"])
+                    if gap > max(8.0, word_height * 0.6):
+                        break
+                phrase = " ".join(str(word["text"]) for word in words[index : end + 1])
+                mapping, _ = self._score_headers([phrase])
+                if mapping:
+                    best_match = (end, next(iter(mapping)))
+            if best_match is None:
+                index += 1
+                continue
+            end, column = best_match
+            if column not in columns:
+                columns[column] = (
+                    float(words[index]["x0"]) + float(words[end]["x1"])
+                ) / 2
+            index = end + 1
+        return columns
+
+    @staticmethod
+    def _group_positioned_words(
+        words: List[Dict[str, Any]],
+    ) -> List[List[Dict[str, Any]]]:
+        ordered_words = sorted(words, key=lambda word: (word["top"], word["x0"]))
+        lines: List[List[Dict[str, Any]]] = []
+        for word in ordered_words:
+            center = (float(word["top"]) + float(word["bottom"])) / 2
+            if lines:
+                previous = lines[-1]
+                previous_center = sum(
+                    (float(item["top"]) + float(item["bottom"])) / 2
+                    for item in previous
+                ) / len(previous)
+                tolerance = max(
+                    2.0,
+                    min(
+                        float(word["bottom"]) - float(word["top"]),
+                        float(previous[0]["bottom"]) - float(previous[0]["top"]),
+                    )
+                    * 0.6,
+                )
+                if abs(center - previous_center) <= tolerance:
+                    previous.append(word)
+                    continue
+            lines.append([word])
+        return [sorted(line, key=lambda word: word["x0"]) for line in lines]
+
+    def _extract_from_positioned_words(
+        self,
+        pages_words: List[List[Dict[str, Any]]],
+        filename: str,
+        global_currency: Optional[str],
+        dayfirst_override: Optional[bool],
+    ) -> Tuple[List[Transaction], List[str]]:
+        transactions: List[Transaction] = []
+        warnings: List[str] = []
+        row_index = 0
+        candidate_rows: List[Dict[str, str]] = []
+
+        for words in pages_words:
+            active_columns: Dict[str, float] = {}
+            for line in self._group_positioned_words(words):
+                header_columns = self._header_column_centers(line)
+                if "date" in header_columns and any(
+                    column in header_columns
+                    for column in ("amount", "debit", "credit")
+                ):
+                    active_columns = header_columns
+                    continue
+                if not active_columns:
+                    continue
+
+                cells: Dict[str, List[str]] = {
+                    column: [] for column in active_columns
+                }
+                for word in line:
+                    nearest_column = min(
+                        active_columns,
+                        key=lambda column: abs(
+                            float(word["x0"] + word["x1"]) / 2
+                            - active_columns[column]
+                        ),
+                    )
+                    cells[nearest_column].append(str(word["text"]))
+                values = {
+                    column: " ".join(parts).strip()
+                    for column, parts in cells.items()
+                }
+                raw_date = values.get("date")
+                if not raw_date:
+                    continue
+                candidate_rows.append(values)
+
+        raw_dates = [row["date"] for row in candidate_rows]
+        resolved_dayfirst, date_warnings = infer_date_convention(
+            raw_dates=raw_dates,
+            currency=global_currency,
+            explicit_dayfirst=(
+                dayfirst_override
+                if dayfirst_override is not None
+                else self.dayfirst
+            ),
+        )
+        warnings.extend(date_warnings)
+        for values in candidate_rows:
+            normalized_date = normalize_date(
+                values.get("date"), dayfirst=resolved_dayfirst
+            )
+            if not normalized_date:
+                continue
+            description = normalize_description(values.get("description"))
+            if is_summary_or_balance_row(description):
+                continue
+            amount, transaction_type, row_currency = determine_amount_and_type(
+                debit_val=values.get("debit"),
+                credit_val=values.get("credit"),
+                amount_val=values.get("amount"),
+                type_hint=values.get("type"),
+            )
+            if amount is None:
+                continue
+            balance, _, _ = parse_numeric_amount(values.get("balance"))
+            currency = (
+                extract_currency(values.get("currency", ""))
+                or row_currency
+                or global_currency
+            )
+            category = values.get("category") or "Unknown"
+            transactions.append(
+                Transaction(
+                    transaction_id=generate_transaction_id(
+                        filename,
+                        row_index,
+                        normalized_date,
+                        description,
+                        amount,
+                    ),
+                    transaction_date=normalized_date,
+                    description=description,
+                    amount=amount,
+                    currency=currency,
+                    transaction_type=transaction_type,
+                    category=category,
+                    source_dataset=filename,
+                    balance=round(balance, 2) if balance is not None else None,
+                )
+            )
+            row_index += 1
+
+        return transactions, warnings
+
     def _extract_from_text(
         self,
         pages_text: List[str],
@@ -507,15 +860,43 @@ class PDFParser:
         # First pass: collect raw candidate transaction lines
         raw_candidates: List[Tuple[str, str, List[str]]] = []
         date_samples: List[str] = []
+        pending_line: Optional[str] = None
+        incomplete_rows = 0
 
         for line in all_lines:
             parsed_line = self._parse_transaction_line(line)
             if parsed_line:
+                if pending_line is not None:
+                    incomplete_rows += 1
+                    pending_line = None
                 raw_dt, desc, amounts = parsed_line
                 raw_candidates.append((raw_dt, desc, amounts))
                 date_samples.append(raw_dt)
+                continue
+
+            if self._starts_with_transaction_date(line):
+                if pending_line is not None:
+                    incomplete_rows += 1
+                pending_line = line
+                continue
+
+            if pending_line is not None:
+                pending_line = f"{pending_line} {line}"
+                parsed_line = self._parse_transaction_line(pending_line)
+                if parsed_line:
+                    raw_dt, desc, amounts = parsed_line
+                    raw_candidates.append((raw_dt, desc, amounts))
+                    date_samples.append(raw_dt)
+                    pending_line = None
+
+        if pending_line is not None:
+            incomplete_rows += 1
 
         if not raw_candidates:
+            if incomplete_rows:
+                warnings.append(
+                    f"Skipped {incomplete_rows} incomplete transaction row(s)."
+                )
             return [], warnings
 
         # Infer date convention across collected lines
@@ -526,7 +907,7 @@ class PDFParser:
         )
         warnings.extend(date_warnings)
 
-        skipped_rows = 0
+        skipped_rows = incomplete_rows
 
         for row_idx, (raw_dt, desc, amounts) in enumerate(raw_candidates):
             normalized_dt = normalize_date(raw_dt, dayfirst=resolved_dayfirst)
@@ -645,33 +1026,348 @@ class PDFParser:
         desc = " ".join(desc_tokens).strip()
         return raw_date, desc, amounts
 
-    def _is_ocr_available(self) -> bool:
-        """
-        Checks whether pytesseract and the tesseract binary are installed and available.
-        """
-        try:
-            import pytesseract  # type: ignore # noqa: F401
-            return shutil.which("tesseract") is not None
-        except ImportError:
-            return False
+    @staticmethod
+    def _starts_with_transaction_date(line: str) -> bool:
+        return bool(
+            re.match(
+                r"^(?:\d{4}[/.-]\d{1,2}[/.-]\d{1,2}|"
+                r"\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|"
+                r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4}|"
+                r"[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{2,4})\b",
+                line.strip(),
+            )
+        )
+
+    def _recognize_page(
+        self, ocr_engine: Any, page: Any, filename: str, page_number: int
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        page_pixels_at_72_dpi = float(page.width) * float(page.height)
+        if page_pixels_at_72_dpi <= 0:
+            raise ValueError("PDF page has invalid dimensions.")
+        if page_pixels_at_72_dpi > MAX_OCR_PAGE_PIXELS:
+            raise ValueError("PDF page exceeds the OCR image size limit.")
+
+        resolution = min(
+            OCR_DPI,
+            72 * math.sqrt(MAX_OCR_PAGE_PIXELS / page_pixels_at_72_dpi),
+        )
+        render_started = time.monotonic()
+        _record_ocr_stage("pdf_page_render_started", page_number)
+        logger.info(
+            "Rendering scanned PDF page",
+            extra={
+                "source_filename": filename,
+                "stage": "pdf_page_render_started",
+                "page_number": page_number,
+                "resolution": resolution,
+            },
+        )
+        page_image = page.to_image(resolution=resolution).original
+        _record_ocr_stage(
+            "pdf_page_render_completed",
+            page_number,
+            time.monotonic() - render_started,
+        )
+        logger.info(
+            "Rendered scanned PDF page",
+            extra={
+                "source_filename": filename,
+                "stage": "pdf_page_render_completed",
+                "page_number": page_number,
+            },
+        )
+        inference_started = time.monotonic()
+        _record_ocr_stage("ocr_inference_started", page_number)
+        logger.info(
+            "PaddleOCR inference started",
+            extra={
+                "source_filename": filename,
+                "stage": "ocr_inference_started",
+                "page_number": page_number,
+            },
+        )
+        page_results = ocr_engine.predict(np.asarray(page_image))
+        _record_ocr_stage(
+            "ocr_inference_completed",
+            page_number,
+            time.monotonic() - inference_started,
+        )
+        logger.info(
+            "PaddleOCR inference completed",
+            extra={
+                "source_filename": filename,
+                "stage": "ocr_inference_completed",
+                "page_number": page_number,
+                "result_count": len(page_results),
+            },
+        )
+
+        page_lines: List[Tuple[float, float, str, float, float]] = []
+        unpositioned_text: List[str] = []
+        for page_result in page_results:
+            result_data = page_result.json.get("res", {})
+            recognized_text = result_data.get("rec_texts", [])
+            boxes = result_data.get("rec_boxes", [])
+            if hasattr(boxes, "tolist"):
+                boxes = boxes.tolist()
+            polygons = result_data.get("rec_polys", [])
+            if hasattr(polygons, "tolist"):
+                polygons = polygons.tolist()
+
+            for index, text in enumerate(recognized_text):
+                if not str(text).strip():
+                    continue
+                box = boxes[index] if index < len(boxes) else None
+                if (not box or len(box) < 4) and index < len(polygons):
+                    polygon = polygons[index]
+                    if len(polygon) >= 4 and all(len(point) >= 2 for point in polygon):
+                        x_coords = [point[0] for point in polygon]
+                        y_coords = [point[1] for point in polygon]
+                        box = [
+                            min(x_coords),
+                            min(y_coords),
+                            max(x_coords),
+                            max(y_coords),
+                        ]
+                if box is not None and len(box) >= 4:
+                    x_min, y_min, x_max, y_max = box[:4]
+                    page_lines.append(
+                        (
+                            (float(y_min) + float(y_max)) / 2,
+                            float(x_min),
+                            str(text).strip(),
+                            float(y_max) - float(y_min),
+                            float(x_max),
+                        )
+                    )
+                else:
+                    unpositioned_text.append(str(text).strip())
+
+        if not page_lines:
+            return self._group_unpositioned_text(unpositioned_text), []
+        page_lines.sort(key=lambda line: (line[0], line[1]))
+        grouped_lines: List[List[Tuple[float, float, str, float, float]]] = []
+        for line in page_lines:
+            if grouped_lines:
+                previous_group = grouped_lines[-1]
+                group_center = sum(item[0] for item in previous_group) / len(previous_group)
+                tolerance = max(8.0, min(line[3], previous_group[0][3]) * 0.6)
+                if abs(line[0] - group_center) <= tolerance:
+                    previous_group.append(line)
+                    continue
+            grouped_lines.append([line])
+
+        positioned_words = [
+            {
+                "x0": x,
+                "x1": x_max,
+                "top": y - height / 2,
+                "bottom": y + height / 2,
+                "text": text,
+            }
+            for y, x, text, height, x_max in page_lines
+        ]
+        return "\n".join(
+            " ".join(item[2] for item in sorted(group, key=lambda item: item[1]))
+            for group in grouped_lines
+        ), positioned_words
+
+    def _group_unpositioned_text(self, text_fragments: List[str]) -> str:
+        rows: List[List[str]] = []
+        for fragment in text_fragments:
+            if self._starts_with_transaction_date(fragment):
+                rows.append([fragment])
+            elif rows:
+                rows[-1].append(fragment)
+            elif fragment:
+                rows.append([fragment])
+        return "\n".join(" ".join(row) for row in rows)
 
     def _attempt_ocr_extraction(
         self,
         pdf: pdfplumber.pdf.PDF,
         filename: str,
-        dayfirst: Optional[bool]
+        dayfirst: Optional[bool],
+        pages: Optional[List[Tuple[int, Any]]] = None,
+        allow_empty: bool = False,
     ) -> ExtractionResult:
-        """
-        Fallback OCR extraction when OCR engine is available.
-        """
+        """Recognize selected scanned pages and parse their transaction rows."""
+        selected_pages = pages or list(enumerate(pdf.pages, start=1))
+        initialization_started = time.monotonic()
+        try:
+            _record_ocr_stage("ocr_model_initialization_started")
+            logger.info(
+                "PaddleOCR model initialization started",
+                extra={
+                    "source_filename": filename,
+                    "stage": "ocr_model_initialization_started",
+                },
+            )
+            ocr_engine = _get_ocr_engine()
+            _record_ocr_stage(
+                "ocr_model_initialization_completed",
+                elapsed_seconds=time.monotonic() - initialization_started,
+            )
+            logger.info(
+                "PaddleOCR model initialization completed",
+                extra={
+                    "source_filename": filename,
+                    "stage": "ocr_model_initialization_completed",
+                },
+            )
+        except ImportError:
+            logger.warning("PaddleOCR is unavailable for scanned PDF %s", filename)
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="pdf",
+                total_transactions=0,
+                transactions=[],
+                warnings=[],
+                error=(
+                    "Scanned PDF detected. Optical Character Recognition (OCR) "
+                    "is not configured in this environment. Please upload a "
+                    "digital/text-based statement or convert it to CSV/XLSX."
+                ),
+            )
+        except Exception:
+            logger.exception("Failed to initialize PaddleOCR for scanned PDF %s", filename)
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="pdf",
+                total_transactions=0,
+                transactions=[],
+                warnings=[],
+                error=(
+                    "OCR engine could not be initialized. Please retry later or "
+                    "upload a digital/text-based statement."
+                ),
+            )
+
+        pages_text: List[str] = []
+        pages_words: List[List[Dict[str, Any]]] = []
+        warnings: List[str] = []
+        _record_ocr_stage("pdf_rendering_started")
+        logger.info(
+            "Scanned PDF rendering started",
+            extra={
+                "source_filename": filename,
+                "stage": "pdf_rendering_started",
+                "page_count": len(selected_pages),
+            },
+        )
+        for page_number, page in selected_pages:
+            page_started = time.monotonic()
+            try:
+                page_text, page_words = self._recognize_page(
+                    ocr_engine, page, filename, page_number
+                )
+                pages_text.append(page_text)
+                pages_words.append(page_words)
+            except Exception:
+                warnings.append(f"OCR could not process PDF page {page_number}.")
+                pages_text.append("")
+                pages_words.append([])
+                _record_ocr_stage(
+                    "pdf_page_processing_failed",
+                    page_number,
+                    time.monotonic() - page_started,
+                )
+                logger.exception(
+                    "OCR failed on scanned PDF page",
+                    extra={
+                        "source_filename": filename,
+                        "stage": "ocr_page_failed",
+                        "page_number": page_number,
+                    },
+                )
+        _record_ocr_stage("pdf_rendering_completed")
+        logger.info(
+            "Scanned PDF rendering and OCR completed",
+            extra={
+                "source_filename": filename,
+                "stage": "pdf_rendering_completed",
+                "page_count": len(pages_text),
+            },
+        )
+
+        recognized_text = "\n".join(pages_text).strip()
+        if not recognized_text and not allow_empty:
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="pdf",
+                total_transactions=0,
+                transactions=[],
+                warnings=warnings,
+                error="Scanned PDF detected, but OCR could not recognize readable text.",
+            )
+
+        _record_ocr_stage("ocr_text_extraction_completed")
+        logger.info(
+            "OCR text extraction completed",
+            extra={
+                "source_filename": filename,
+                "stage": "ocr_text_extraction_completed",
+                "recognized_character_count": len(recognized_text),
+            },
+        )
+        currency = extract_currency(recognized_text[:2000])
+        parsing_started = time.monotonic()
+        _record_ocr_stage("transaction_parsing_started")
+        logger.info(
+            "OCR transaction parsing started",
+            extra={
+                "source_filename": filename,
+                "stage": "transaction_parsing_started",
+            },
+        )
+        line_transactions, parser_warnings = self._extract_from_text(
+            pages_text, filename, currency, dayfirst
+        )
+        positioned_transactions, positioned_warnings = (
+            self._extract_from_positioned_words(
+                pages_words, filename, currency, dayfirst
+            )
+        )
+        transactions = self._merge_transactions(
+            positioned_transactions, line_transactions
+        )
+        warnings.extend(parser_warnings)
+        warnings.extend(positioned_warnings)
+        _record_ocr_stage(
+            "transaction_parsing_completed",
+            elapsed_seconds=time.monotonic() - parsing_started,
+        )
+        logger.info(
+            "OCR transaction parsing completed",
+            extra={
+                "source_filename": filename,
+                "stage": "transaction_parsing_completed",
+                "transaction_count": len(transactions),
+                "warning_count": len(warnings),
+            },
+        )
+        if not transactions and not allow_empty:
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="pdf",
+                total_transactions=0,
+                transactions=[],
+                warnings=warnings,
+                error="OCR could not extract any valid transactions from the scanned PDF.",
+            )
+
         return ExtractionResult(
-            success=False,
+            success=True,
             filename=filename,
             file_type="pdf",
-            total_transactions=0,
-            transactions=[],
-            warnings=[],
-            error="OCR processing is not enabled in this environment."
+            total_transactions=len(transactions),
+            transactions=transactions,
+            warnings=warnings,
+            error=None,
         )
 
 
@@ -686,3 +1382,16 @@ def parse_pdf(
     parser = PDFParser(dayfirst=dayfirst)
     return parser.parse(file_source, filename, dayfirst=dayfirst)
 
+
+def is_scanned_pdf(pdf_bytes: bytes) -> bool:
+    """Return whether any page has image content without sufficient extractable text."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            if not pdf.pages:
+                return False
+            for page in pdf.pages:
+                if _page_needs_ocr(page):
+                    return True
+            return False
+    except Exception:
+        return False

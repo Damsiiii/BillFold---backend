@@ -4,6 +4,7 @@ Tharanya's Module: Statement Upload & Data Extraction.
 Provides POST /api/upload for uploading PDF, CSV, and XLSX statements,
 validating file security, format, size, and dispatching to canonical parsers.
 """
+import logging
 from typing import Optional
 from fastapi import FastAPI, APIRouter, UploadFile, File, Query, status
 from fastapi.responses import JSONResponse
@@ -14,6 +15,7 @@ from services.pdf_parser import parse_pdf
 from services.csv_parser import parse_csv
 from services.excel_parser import parse_excel
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Statement Upload"])
 
 
@@ -102,6 +104,10 @@ def upload_statement(
         )
 
     except Exception:
+        logger.exception(
+            "Statement extraction failed unexpectedly",
+            extra={"source_filename": safe_name, "stage": "statement_extraction_failed"},
+        )
         err_result = ExtractionResult(
             success=False,
             filename=safe_name,

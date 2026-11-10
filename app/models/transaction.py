@@ -14,6 +14,6 @@ class Transaction(Base):
     type = Column(String, nullable=False)            # "debit" or "credit"
     category = Column(String, default="Uncategorized")
     balance = Column(Float, nullable=True)
-    currency = Column(String, default="LKR")
+    currency = Column(String, nullable=True)
     source_file = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

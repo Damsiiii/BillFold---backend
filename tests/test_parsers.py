@@ -5,13 +5,15 @@ encoding handling, delimiter detection, and schema standardization.
 """
 import io
 import datetime
+import logging
+from types import SimpleNamespace
 import openpyxl
 import pypdf
 import pytest
 
 from services.csv_parser import CSVParser, parse_csv
 from services.excel_parser import ExcelParser, parse_excel
-from services.pdf_parser import PDFParser, parse_pdf
+from services.pdf_parser import PDFParser, is_scanned_pdf, parse_pdf
 from models.transaction import Transaction, ExtractionResult
 
 
@@ -686,7 +688,12 @@ def create_test_text_pdf(lines: list[str]) -> bytes:
     return header + obj1 + obj2 + obj3 + obj4 + obj5 + xref.encode("ascii") + trailer.encode("ascii")
 
 
-def create_test_table_pdf(headers: list[str], rows: list[list[str]], col_widths: list[float] | None = None) -> bytes:
+def create_test_table_pdf(
+    headers: list[str],
+    rows: list[list[str]],
+    col_widths: list[float] | None = None,
+    page_size: tuple[float, float] = (612.0, 792.0),
+) -> bytes:
     """Helper to synthesize a PDF with a bordered grid table and cell contents."""
     if col_widths is None:
         if len(headers) == 5:
@@ -698,7 +705,7 @@ def create_test_table_pdf(headers: list[str], rows: list[list[str]], col_widths:
 
     total_width = sum(col_widths)
     x_start = 50.0
-    y_start = 700.0
+    y_start = page_size[1] - 92.0
     row_height = 20.0
 
     col_x = [x_start]
@@ -739,7 +746,11 @@ def create_test_table_pdf(headers: list[str], rows: list[list[str]], col_widths:
     obj2 = b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
     obj4 = b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
     obj5 = b"5 0 obj\n<< /Length " + str(len(content_bytes)).encode("ascii") + b" >>\nstream\n" + content_bytes + b"\nendstream\nendobj\n"
-    obj3 = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n"
+    obj3 = (
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "
+        f"{page_size[0]} {page_size[1]}] /Resources << /Font << /F1 4 0 R >> "
+        ">> /Contents 5 0 R >>\nendobj\n"
+    ).encode("ascii")
 
     header = b"%PDF-1.4\n"
     offsets = [0]
@@ -893,6 +904,122 @@ class TestPDFParser:
         assert result.transactions[1].amount == 1200.00
         assert result.transactions[1].transaction_type == "income"
 
+    def test_pdf_prefers_structured_row_over_conflicting_fallback(self):
+        structured = Transaction(
+            transaction_id="structured",
+            transaction_date="2024-02-01",
+            description="Card payment",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+            balance=90.0,
+        )
+        fallback = structured.model_copy(
+            update={
+                "transaction_id": "fallback",
+                "balance": 91.0,
+            }
+        )
+
+        result = PDFParser._merge_transactions([structured], [fallback])
+
+        assert result == [structured]
+
+    def test_pdf_merge_prefers_table_direction_over_conflicting_fallback(self):
+        table_row = Transaction(
+            transaction_id="table-row",
+            transaction_date="2024-02-01",
+            description="Card payment",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+        )
+        fallback_row = table_row.model_copy(
+            update={
+                "transaction_id": "fallback-row",
+                "transaction_type": "income",
+            }
+        )
+
+        result = PDFParser._merge_transactions([table_row], [fallback_row])
+
+        assert result == [table_row]
+
+    def test_pdf_merge_preserves_repeated_same_day_transactions(self):
+        first = Transaction(
+            transaction_id="first",
+            transaction_date="2024-02-01",
+            description="Market purchase",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+        )
+        repeated = first.model_copy(update={"transaction_id": "repeated"})
+        fallback_matches = [
+            first.model_copy(update={"transaction_id": "fallback-1"}),
+            first.model_copy(update={"transaction_id": "fallback-2"}),
+        ]
+
+        result = PDFParser._merge_transactions(
+            [first, repeated], fallback_matches
+        )
+
+        assert [transaction.transaction_id for transaction in result] == [
+            "first",
+            "repeated",
+        ]
+
+    def test_pdf_merge_preserves_debit_credit_collisions(self):
+        debit = Transaction(
+            transaction_id="debit",
+            transaction_date="2024-02-01",
+            description="Transfer",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+        )
+        credit = debit.model_copy(
+            update={"transaction_id": "credit", "transaction_type": "income"}
+        )
+
+        result = PDFParser._merge_transactions([debit, credit])
+
+        assert [transaction.transaction_type for transaction in result] == [
+            "expense",
+            "income",
+        ]
+
+    @pytest.mark.parametrize("rotation", [90, 180, 270])
+    def test_pdf_rotated_page_is_normalized_before_extraction(self, rotation):
+        source = pypdf.PdfReader(
+            io.BytesIO(
+                create_test_table_pdf(
+                    ["Date", "Description", "Amount", "Balance"],
+                    [["2024-02-15", "Rotation test", "-10.00", "90.00"]],
+                )
+            )
+        )
+        source.pages[0].rotate(rotation)
+        writer = pypdf.PdfWriter(clone_from=source)
+        output = io.BytesIO()
+        writer.write(output)
+
+        result = parse_pdf(output.getvalue(), filename="rotated.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].transaction_date == "2024-02-15"
+        assert result.transactions[0].description == "Rotation test"
+        assert result.transactions[0].transaction_type == "expense"
+
     def test_pdf_text_fallback_extraction(self):
         """Test fallback to line-based text parsing for non-grid formatted statements."""
         lines = [
@@ -948,6 +1075,75 @@ class TestPDFParser:
             "2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"
         ]
 
+    def test_pdf_multipage_tables_with_different_column_layouts(self):
+        """Preserve each page's own headers when table layouts change."""
+        page_tables = [
+            (
+                ["Date", "Description", "Debit", "Credit", "Balance"],
+                [["2024-11-06", "Card purchase", "$12.50", "", "$987.50"]],
+                {},
+            ),
+            (
+                [
+                    "Posting Date",
+                    "Details",
+                    "Net Amount",
+                    "D/C",
+                    "Available Balance",
+                    "Currency",
+                ],
+                [["17.11.2024", "Refund", "18.25", "CR", "1,005.75", "EUR"]],
+                {
+                    "col_widths": [115.0, 155.0, 100.0, 45.0, 150.0, 80.0],
+                    "page_size": (842.0, 595.0),
+                },
+            ),
+        ]
+        writer = pypdf.PdfWriter()
+        for headers, rows, layout in page_tables:
+            page_pdf = pypdf.PdfReader(
+                io.BytesIO(create_test_table_pdf(headers, rows, **layout))
+            )
+            writer.add_page(page_pdf.pages[0])
+        output = io.BytesIO()
+        writer.write(output)
+
+        result = parse_pdf(output.getvalue(), filename="varied-layouts.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 2
+        assert [
+            (txn.transaction_date, txn.description, txn.amount, txn.transaction_type)
+            for txn in result.transactions
+        ] == [
+            ("2024-11-06", "Card purchase", 12.5, "expense"),
+            ("2024-11-17", "Refund", 18.25, "income"),
+        ]
+        assert result.transactions[0].currency == "USD"
+        assert result.transactions[0].balance == 987.5
+        assert result.transactions[1].currency == "EUR"
+        assert result.transactions[1].balance == 1005.75
+
+    def test_pdf_transaction_row_can_continue_across_pages(self):
+        """Join a wrapped transaction line split by a page boundary."""
+        pdf_bytes = create_test_multipage_pdf(
+            [
+                ["2024-12-01 International transfer to"],
+                ["savings account -250.00 750.00"],
+            ]
+        )
+
+        result = parse_pdf(pdf_bytes, filename="wrapped-row.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].description == (
+            "International transfer to savings account"
+        )
+        assert result.transactions[0].amount == 250.0
+        assert result.transactions[0].transaction_type == "expense"
+        assert result.transactions[0].balance == 750.0
+
     def test_pdf_password_protected_encrypted_rejection(self):
         """Test clean rejection of encrypted/password-protected PDF files."""
         enc_bytes = create_test_encrypted_pdf(password="secret123")
@@ -958,8 +1154,12 @@ class TestPDFParser:
         assert len(result.transactions) == 0
         assert "password" in (result.error or "").lower()
 
-    def test_pdf_scanned_detection(self):
-        """Test detection of scanned PDFs and clear error when OCR is unavailable."""
+    def test_pdf_scanned_ocr_unavailable(self, monkeypatch):
+        """Test scanned PDFs retain a clear fallback when PaddleOCR is unavailable."""
+        def unavailable_ocr_engine():
+            raise ModuleNotFoundError("No module named 'paddleocr'")
+
+        monkeypatch.setattr("services.pdf_parser._get_ocr_engine", unavailable_ocr_engine)
         scanned_bytes = create_test_scanned_pdf()
         result = parse_pdf(scanned_bytes, filename="scanned.pdf")
 
@@ -967,6 +1167,196 @@ class TestPDFParser:
         assert result.total_transactions == 0
         assert len(result.transactions) == 0
         assert "scanned" in (result.error or "").lower()
+        assert "not configured" in (result.error or "").lower()
+
+    def test_pdf_scanned_uses_paddle_ocr_and_extracts_transactions(
+        self, monkeypatch, caplog
+    ):
+        """Test PaddleOCR output is grouped into transaction rows and parsed."""
+        caplog.set_level(logging.INFO, logger="services.pdf_parser")
+
+        class FakeOCRResult:
+            json = {
+                "res": {
+                    "rec_texts": [
+                        "2024-01-05",
+                        "Grocery Store",
+                        "-85.50",
+                        "1414.50",
+                    ],
+                    "rec_boxes": [
+                        [10, 20, 90, 40],
+                        [100, 20, 220, 40],
+                        [400, 20, 460, 40],
+                        [470, 20, 530, 40],
+                    ],
+                }
+            }
+
+        class FakePaddleOCR:
+            def predict(self, image):
+                assert image.ndim == 3
+                return [FakeOCRResult()]
+
+        monkeypatch.setattr(
+            "services.pdf_parser._get_ocr_engine", lambda: FakePaddleOCR()
+        )
+        result = parse_pdf(create_test_scanned_pdf(), filename="scanned.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].transaction_date == "2024-01-05"
+        assert result.transactions[0].description == "Grocery Store"
+        assert result.transactions[0].amount == 85.50
+        assert result.transactions[0].transaction_type == "expense"
+        assert any(
+            getattr(record, "stage", None) == "ocr_inference_started"
+            for record in caplog.records
+        )
+        assert any(
+            getattr(record, "stage", None) == "transaction_parsing_completed"
+            for record in caplog.records
+        )
+
+    def test_pdf_mixed_digital_and_scanned_pages(self, monkeypatch):
+        class FakeOCRResult:
+            json = {
+                "res": {
+                    "rec_texts": [
+                        "2024-01-05 Cash deposit 35.00 CR 125.00"
+                    ],
+                    "rec_boxes": [[10, 20, 500, 60]],
+                }
+            }
+
+        class FakePaddleOCR:
+            def predict(self, image):
+                return [FakeOCRResult()]
+
+        writer = pypdf.PdfWriter()
+        digital_page = pypdf.PdfReader(
+            io.BytesIO(
+                create_test_text_pdf(
+                    ["2024-01-03 Online payment -10.00 90.00"]
+                )
+            )
+        ).pages[0]
+        scanned_page = pypdf.PdfReader(
+            io.BytesIO(create_test_scanned_pdf())
+        ).pages[0]
+        writer.add_page(digital_page)
+        writer.add_page(scanned_page)
+        output = io.BytesIO()
+        writer.write(output)
+        pdf_bytes = output.getvalue()
+
+        monkeypatch.setattr(
+            "services.pdf_parser._get_ocr_engine", lambda: FakePaddleOCR()
+        )
+
+        assert is_scanned_pdf(pdf_bytes) is True
+        result = parse_pdf(pdf_bytes, filename="mixed-pages.pdf")
+
+        assert result.success is True
+        assert {
+            (txn.transaction_date, txn.description, txn.transaction_type)
+            for txn in result.transactions
+        } == {
+            ("2024-01-03", "Online payment", "expense"),
+            ("2024-01-05", "Cash deposit", "income"),
+        }
+
+    def test_pdf_scanned_uses_recognition_polygons_when_boxes_are_missing(self, monkeypatch):
+        class FakeOCRResult:
+            json = {
+                "res": {
+                    "rec_texts": [
+                        "2024-01-05",
+                        "Grocery Store",
+                        "-85.50",
+                        "1414.50",
+                    ],
+                    "rec_polys": [
+                        [[10, 20], [90, 20], [90, 40], [10, 40]],
+                        [[100, 20], [220, 20], [220, 40], [100, 40]],
+                        [[400, 20], [460, 20], [460, 40], [400, 40]],
+                        [[470, 20], [530, 20], [530, 40], [470, 40]],
+                    ],
+                }
+            }
+
+        class FakePaddleOCR:
+            def predict(self, image):
+                return [FakeOCRResult()]
+
+        monkeypatch.setattr(
+            "services.pdf_parser._get_ocr_engine", lambda: FakePaddleOCR()
+        )
+        result = parse_pdf(create_test_scanned_pdf(), filename="scanned.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].transaction_date == "2024-01-05"
+        assert result.transactions[0].description == "Grocery Store"
+        assert result.transactions[0].amount == 85.50
+        assert result.transactions[0].transaction_type == "expense"
+
+    def test_scanned_pdf_ocr_caps_rendering_resolution(self, monkeypatch):
+        class FakeOCRResult:
+            json = {
+                "res": {
+                    "rec_texts": ["2024-01-05 Grocery Store -85.50 1414.50"],
+                    "rec_boxes": [[10, 20, 500, 60]],
+                }
+            }
+
+        class FakePage:
+            width = 612
+            height = 792
+            resolution = None
+
+            def to_image(self, resolution):
+                self.resolution = resolution
+                return SimpleNamespace(original=[[[0, 0, 0]]])
+
+        class FakeOCR:
+            def predict(self, image):
+                return [FakeOCRResult()]
+
+        page = FakePage()
+        monkeypatch.setattr("services.pdf_parser._get_ocr_engine", lambda: FakeOCR())
+        result = PDFParser()._attempt_ocr_extraction(
+            SimpleNamespace(pages=[page]), "scanned.pdf", None
+        )
+
+        assert result.success is True
+        assert page.resolution <= 150
+
+    def test_scanned_pdf_ocr_accepts_more_than_twenty_pages(self, monkeypatch):
+        class FakeOCR:
+            pass
+
+        monkeypatch.setattr("services.pdf_parser._get_ocr_engine", lambda: FakeOCR())
+        monkeypatch.setattr(
+            PDFParser,
+            "_recognize_page",
+            lambda self, engine, page, filename, page_number: (
+                f"2024-01-{page_number:02d} Transaction {page_number} "
+                "-1.00 9.00",
+                [],
+            ),
+        )
+        pages = [(number, object()) for number in range(1, 22)]
+
+        result = PDFParser()._attempt_ocr_extraction(
+            SimpleNamespace(pages=[page for _, page in pages]),
+            "multipage-scan.pdf",
+            None,
+            pages=pages,
+        )
+
+        assert result.success is True
+        assert result.total_transactions == 21
 
     def test_pdf_empty_file_rejection(self):
         """Test that zero-byte PDF upload is cleanly rejected."""
@@ -1150,5 +1540,3 @@ class TestPDFParser:
         assert len(res.transactions) == 0
         assert res.error is not None
         assert "corrupted" in res.error.lower() or "invalid" in res.error.lower()
-
-

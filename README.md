@@ -42,14 +42,15 @@ requirements.txt             # Project dependencies
 |---|---|---|---|---|
 | `GET` | `/health` | System | Health check verification | **Implemented** |
 | `POST` | `/chat` | Member 4 | AI personal finance assistant grounded in real data | **Implemented** |
-| `POST` | `/upload-statement` | Member 1 | Bank statement upload (PDF, CSV, Excel) | *Integration interface ready* |
-| `GET` | `/transactions` | Member 2 | Processed transaction history from SQLite | *Integration interface ready* |
-| `GET` | `/analytics/summary` | Member 3 | Income, expense, and net cash flow summary | *Integration interface ready* |
-| `GET` | `/analytics/categories` | Member 3 | Category-wise spending breakdown | *Integration interface ready* |
-| `GET` | `/recommendations/budget` | Member 3 | Personalized budget suggestions | *Integration interface ready* |
-| `GET` | `/recommendations/savings` | Member 3 | Actionable savings opportunities | *Integration interface ready* |
-| `GET` | `/detection/overspending` | Member 3 | Overspending category detection | *Integration interface ready* |
-| `GET` | `/detection/anomalies` | Member 3 | Suspicious transaction anomaly detection | *Integration interface ready* |
+| `POST` | `/upload-statement` | Member 1 | Idempotent PDF, CSV, and Excel statement upload with background OCR for scanned PDFs | **Implemented** |
+| `GET` | `/upload-status/{job_id}` | Member 1 | Poll asynchronous scanned-statement processing status | **Implemented** |
+| `GET` | `/transactions` | Member 2 | User-scoped transaction history from SQLite | **Implemented** |
+| `GET` | `/analytics/summary` | Member 3 | User-scoped income, expense, and net cash flow summary | **Implemented** |
+| `GET` | `/analytics/categories` | Member 3 | User-scoped category spending breakdown | **Implemented** |
+| `GET` | `/recommendations/budget` | Member 3 | User-scoped monthly budget suggestions | **Implemented** |
+| `GET` | `/recommendations/savings` | Member 3 | User-scoped savings opportunities and recurring subscriptions | **Implemented** |
+| `GET` | `/detection/overspending` | Member 3 | User-scoped overspending category detection | **Implemented** |
+| `GET` | `/detection/anomalies` | Member 3 | User-scoped unusual transaction detection | **Implemented** |
 
 ---
 
@@ -76,6 +77,8 @@ source .venv/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
+
+Scanned-PDF OCR is an optional dependency set. Install `requirements-ocr.txt` to enable PaddleOCR processing.
 
 ### Step 3: Configure Environment Variables
 
@@ -177,4 +180,3 @@ pytest -v
 ```
 
 All 14 test cases cover application startup, health check, OpenAPI documentation, chatbot validation, context grounding, fallback error handling, and integration interfaces.
-

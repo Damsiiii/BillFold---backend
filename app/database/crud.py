@@ -1,4 +1,5 @@
 from datetime import date
+import time
 from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 from app.models.transaction import Transaction
@@ -9,28 +10,19 @@ def save_transactions(
     user_id: str,
     transactions: List[Dict[str, Any]],
     source_file: Optional[str] = None,
+    deadline: Optional[float] = None,
+    commit: bool = True,
 ) -> int:
-    """Saves clean transactions. Skips rows already stored (re-uploads). Returns number saved."""
-    saved = 0
+    """Save every extracted transaction; upload-level idempotency is handled separately."""
     for tx in transactions:
-        exists = (
-            db.query(Transaction.id)
-            .filter(
-                Transaction.user_id == user_id,
-                Transaction.date == tx["date"],
-                Transaction.description == tx["description"],
-                Transaction.amount == tx["amount"],
-                Transaction.type == tx["type"],
-                Transaction.balance == tx.get("balance"),
-            )
-            .first()
-        )
-        if exists:
-            continue
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError("Transaction persistence exceeded its time limit.")
         db.add(Transaction(user_id=user_id, source_file=source_file, **tx))
-        saved += 1
-    db.commit()
-    return saved
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("Transaction persistence exceeded its time limit.")
+    if commit:
+        db.commit()
+    return len(transactions)
 
 
 def get_transactions(

@@ -61,7 +61,7 @@ flowchart TD
     
     H -- "Normalize Dates, Amounts, Types, Exclude Balances" --> I["models/transaction.py (Transaction)"]
     
-    I -- "Extraction Failure / Scanned PDF / Password Protected" --> ERR422["422 Unprocessable Content"]
+    I -- "Extraction Failure / Unsupported or Password Protected PDF" --> ERR422["422 Unprocessable Content"]
     I -- "Extraction Success" --> OK200["200 OK (Canonical ExtractionResult)"]
     
     subgraph Stream Safety
@@ -72,6 +72,15 @@ flowchart TD
     ERR422 --> S
     OK200 --> S
 ```
+
+### PDF Compatibility and Extraction
+PDF processing is page-oriented and does not depend on a particular filename, bank, or fixed table layout. It tries detected tables, positioned text, then line-based text; duplicate interpretations from lower-priority strategies do not override structured debit/credit values. Header mappings are retained per table/page, including continuation pages. Rotated page content is normalized before extraction.
+
+Pages containing images with little extractable text are sent through PaddleOCR, including scanned pages mixed with digital pages. OCR uses the page's actual geometry, caps render resolution for large pages, and enables document/text orientation handling. `requirements.txt` includes the PDF parsing libraries. Install `requirements-ocr.txt` to enable scanned-PDF OCR; without that optional runtime, scanned uploads fail clearly rather than being reported as successfully extracted.
+
+The integrated `POST /upload-statement` endpoint queues scanned PDFs and returns `202 Accepted`; clients can poll `GET /upload-status/{job_id}`. OCR runs in an isolated child process with a fixed timeout so a malformed or stalled document is marked failed and does not leave the worker stuck.
+
+The integrated upload endpoint records a SHA-256 fingerprint of each accepted file, unique per user. Re-uploading identical bytes returns the existing result or job rather than persisting the statement again. Failed uploads can be retried. Transaction rows are not deduplicated by date, description, or amount, so identical-looking transactions in a statement or in a distinct upload remain separate records. Unknown currency remains unset.
 
 ---
 
@@ -216,7 +225,7 @@ Uploads and extracts transactions from a bank statement file.
 }
 ```
 
-### D. Scanned PDF Document Without OCR (`422 Unprocessable Content`)
+### D. Scanned PDF When the OCR Runtime Is Not Installed (`422 Unprocessable Content`)
 ```json
 {
   "success": false,
@@ -316,24 +325,13 @@ pytest -v tests/test_validator.py
 pytest -v tests/test_upload.py
 ```
 
-### Test Suite Execution Summary
-- **Total Tests**: 97 passed in 3.21 seconds.
-- **Breakdown**:
-  - `tests/test_parsers.py` (53 tests):
-    - CSV parser: 21 tests (delimiters, encodings, signed/unsigned amounts, debit/credit columns, invalid dates).
-    - Excel parser: 14 tests (`.xlsx` multi-sheet detection, formulas, serial dates, `.xls` rejection).
-    - PDF parser: 18 tests (grid tables, line fallback, DR/CR tokens, multi-page, scanned detection, password protection, summary exclusion).
-  - `tests/test_validator.py` (21 tests):
-    - Magic bytes signatures, 15 MB boundary, empty files, path traversal sanitization, stream rewind safety.
-  - `tests/test_upload.py` (23 tests):
-    - 20 API upload tests (200, 400, 413, 422, 500 error mapping, file stream closure).
-    - 3 comprehensive end-to-end workflow verification tests across CSV, XLSX, and PDF.
+### Automated Coverage
+Parser tests use synthetic digital tables with different headers, column orders, page sizes, and rotations; split-page text rows; mixed digital/scanned PDFs; and mocked OCR results. Upload integration tests also verify isolated timeout handling, queued job progress, and terminal failure reporting.
 
 ---
 
 ## 11. Known Limitations & Recommendations
 
-1. **Scanned PDF Limitation**: When a PDF contains only scanned raster images and zero extractable text, OCR (e.g., Tesseract) is required. Because Tesseract binaries are not bundled in standard container/OS baselines, scanned PDFs are rejected with clear error guidance. To extract from scanned PDFs in production, installing `tesseract-ocr` and configuring `pytesseract` is recommended.
+1. **OCR Runtime**: Scanned-page extraction requires the optional PaddleOCR/PaddlePaddle dependencies in `requirements-ocr.txt`. OCR initialization or page failures are reported explicitly, and asynchronous OCR jobs time out instead of remaining in `processing`.
 2. **Password Protection**: Encrypted PDFs must be unlocked by the user before upload. Decryption in-memory without a user-provided password is intentionally not attempted to preserve document security.
 3. **Legacy `.xls`**: Users must convert old `.xls` spreadsheets to modern `.xlsx` or export as CSV before uploading.
-
