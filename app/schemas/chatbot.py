@@ -42,8 +42,9 @@ class FinancialContext(BaseModel):
     has_data: bool = False
     monthly_income: Optional[float] = None
     monthly_expenses: Optional[float] = None
+    currency: Optional[str] = None
     category_spending: Optional[Dict[str, float]] = None
     recent_transactions: Optional[List[Dict[str, Any]]] = None
     budget_recommendations: Optional[Dict[str, Any]] = None
     savings_recommendations: Optional[Dict[str, Any]] = None
-
+    financial_data: Dict[str, Any] = Field(default_factory=dict)
