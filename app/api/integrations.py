@@ -4,9 +4,24 @@ Provides structured route registration and integration points.
 Business logic is deferred to the respective member modules via pluggable dependency handlers.
 """
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
+
+import pandas as pd
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
+
+from app.database import crud
+from app.database.database import SessionLocal
+from app.services.analytics_engine import (
+    compute_category_spending,
+    compute_financial_summary,
+)
+from app.services.anomaly_detection import detect_anomalies as run_anomaly_detection
+from app.services.budget_engine import (
+    detect_overspending as run_overspending_detection,
+    generate_suggested_budgets,
+)
+from app.services.savings_engine import calculate_savings_recommendations
 
 router = APIRouter(tags=["Team Integrations"])
 
@@ -14,7 +29,7 @@ router = APIRouter(tags=["Team Integrations"])
 class ApiResponseEnvelope(BaseModel):
     status: str
     message: str
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[Any] = None
 
 
 # Pluggable handler registries for Members 1, 2, and 3
@@ -31,6 +46,80 @@ class ModuleRegistry:
 
 
 registry = ModuleRegistry()
+
+
+def _load_user_transactions(user_id: str) -> pd.DataFrame:
+    db = SessionLocal()
+    try:
+        rows = crud.get_transactions(db, user_id=user_id, limit=None)
+        transactions = []
+        for row in rows:
+            transaction = crud.to_dict(row)
+            transaction_type = transaction["type"].strip().lower()
+            if transaction_type == "debit":
+                transaction_type = "expense"
+            elif transaction_type == "credit":
+                transaction_type = "income"
+            transactions.append(
+                {
+                    "transaction_id": transaction["id"],
+                    "transaction_date": transaction["date"],
+                    "description": transaction["description"],
+                    "amount": transaction["amount"],
+                    "currency": transaction["currency"],
+                    "transaction_type": transaction_type,
+                    "category": transaction["category"],
+                    "source_dataset": row.source_file,
+                }
+            )
+        return pd.DataFrame(transactions)
+    finally:
+        db.close()
+
+
+async def _get_transactions(user_id: str, limit: int) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        rows = crud.get_transactions(db, user_id=user_id, limit=limit)
+        return {
+            "transactions": [crud.to_dict(row) for row in rows],
+            "count": len(rows),
+        }
+    finally:
+        db.close()
+
+
+async def _get_summary(user_id: str) -> dict[str, Any]:
+    return compute_financial_summary(_load_user_transactions(user_id))
+
+
+async def _get_categories(user_id: str) -> list[dict[str, Any]]:
+    return compute_category_spending(_load_user_transactions(user_id))
+
+
+async def _get_budgets(user_id: str) -> dict[str, Any]:
+    return generate_suggested_budgets(_load_user_transactions(user_id))
+
+
+async def _get_savings(user_id: str) -> dict[str, Any]:
+    return calculate_savings_recommendations(_load_user_transactions(user_id))
+
+
+async def _get_overspending(user_id: str) -> dict[str, Any]:
+    return run_overspending_detection(_load_user_transactions(user_id))
+
+
+async def _get_anomalies(user_id: str) -> dict[str, Any]:
+    return run_anomaly_detection(_load_user_transactions(user_id))
+
+
+registry.member2_transactions_handler = _get_transactions
+registry.member3_summary_handler = _get_summary
+registry.member3_categories_handler = _get_categories
+registry.member3_budget_handler = _get_budgets
+registry.member3_savings_handler = _get_savings
+registry.member3_overspending_handler = _get_overspending
+registry.member3_anomalies_handler = _get_anomalies
 
 
 def _not_implemented_response(module_name: str, responsible_member: str) -> None:
@@ -195,4 +284,3 @@ async def detect_anomalies(
             data=result,
         )
     _not_implemented_response("Anomaly Detection", "Member 3")
-

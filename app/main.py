@@ -1,5 +1,6 @@
 import logging
 import os
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.encoders import jsonable_encoder
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.chatbot import router as chatbot_router
 from app.api.integrations import router as integrations_router
+from app.database.database import init_db
 
 # Load environment variables from .env
 load_dotenv()
@@ -19,12 +21,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backend")
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="Personal Finance Recommendation System",
     description="Backend API Integration and AI Chatbot (Member 4)",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS configuration for frontend clients

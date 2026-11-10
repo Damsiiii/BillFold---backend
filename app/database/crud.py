@@ -36,7 +36,7 @@ def save_transactions(
 def get_transactions(
     db: Session,
     user_id: str,
-    limit: int = 50,
+    limit: Optional[int] = 50,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
     category: Optional[str] = None,
@@ -51,7 +51,10 @@ def get_transactions(
         query = query.filter(Transaction.category == category)
     if tx_type:
         query = query.filter(Transaction.type == tx_type)
-    return query.order_by(Transaction.date.desc(), Transaction.id.desc()).limit(limit).all()
+    query = query.order_by(Transaction.date.desc(), Transaction.id.desc())
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 
 def delete_user_transactions(db: Session, user_id: str) -> int:
