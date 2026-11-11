@@ -15,6 +15,7 @@ def init_db() -> None:
     """Create all tables. Call once when the app starts."""
     from app.models import transaction  # noqa: F401  (registers the model)
     from app.models import upload_job  # noqa: F401  (registers the model)
+    from app.models import upload_claim  # noqa: F401  (registers the model)
 
     inspector = inspect(engine)
     if "statement_upload_jobs" in inspector.get_table_names():
@@ -33,6 +34,16 @@ def init_db() -> None:
                     "ADD COLUMN is_async BOOLEAN NOT NULL DEFAULT 0"
                 )
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT OR IGNORE INTO statement_upload_claims "
+            "(user_id, content_hash, job_id) "
+            "SELECT user_id, content_hash, id "
+            "FROM statement_upload_jobs "
+            "WHERE content_hash IS NOT NULL "
+            "ORDER BY CASE WHEN status = 'completed' THEN 0 ELSE 1 END, "
+            "created_at, id"
+        )
 
 
 def get_db():

@@ -42,8 +42,8 @@ requirements.txt             # Project dependencies
 |---|---|---|---|---|
 | `GET` | `/health` | System | Health check verification | **Implemented** |
 | `POST` | `/chat` | Member 4 | AI personal finance assistant grounded in real data | **Implemented** |
-| `POST` | `/upload-statement` | Member 1 | Idempotent PDF, CSV, and Excel statement upload with background OCR for scanned PDFs | **Implemented** |
-| `GET` | `/upload-status/{job_id}` | Member 1 | Poll asynchronous scanned-statement processing status | **Implemented** |
+| `POST` | `/upload-statement` | Member 1 | Idempotent PDF, CSV, XLS/XLSX, JPG, JPEG, and PNG uploads with OCR for images and scanned PDFs | **Implemented** |
+| `GET` | `/upload-status/{job_id}` | Member 1 | Poll asynchronous scanned-PDF and image statement processing | **Implemented** |
 | `GET` | `/transactions` | Member 2 | User-scoped transaction history from SQLite | **Implemented** |
 | `GET` | `/analytics/summary` | Member 3 | User-scoped income, expense, and net cash flow summary | **Implemented** |
 | `GET` | `/analytics/categories` | Member 3 | User-scoped category spending breakdown | **Implemented** |

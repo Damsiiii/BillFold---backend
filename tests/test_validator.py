@@ -5,6 +5,7 @@ empty file handling, and stream safety.
 """
 import io
 import zipfile
+from types import SimpleNamespace
 import pytest
 
 from services.file_validator import (
@@ -81,7 +82,7 @@ class TestFileValidator:
             ("archive.zip", b"PK\x03\x04..."),
             ("document.docx", b"PK\x03\x04..."),
             ("script.py", b"print('hello')"),
-            ("image.png", b"\x89PNG\r\n\x1a\n"),
+            ("image.gif", b"GIF89a"),
             ("malware.exe", b"MZ\x90\x00"),
         ]
         for name, content in unsupported:
@@ -89,13 +90,28 @@ class TestFileValidator:
             assert res.is_valid is False
             assert "unsupported" in (res.error or "").lower()
 
-    def test_legacy_xls_explicit_rejection_with_conversion_message(self):
-        """Test that legacy .xls files are explicitly rejected with conversion guidance."""
+    def test_legacy_xls_is_validated_with_the_xls_reader(self, monkeypatch):
+        """Test that legacy XLS content is inspected rather than rejected by extension."""
+        fake_workbook = SimpleNamespace(
+            nsheets=1,
+            release_resources=lambda: None,
+        )
+        fake_xlrd = SimpleNamespace(
+            open_workbook=lambda **kwargs: fake_workbook,
+        )
+        monkeypatch.setitem(__import__("sys").modules, "xlrd", fake_xlrd)
         result = validate_file(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1dummy", filename="old_statement.xls")
+        assert result.is_valid is True
+        assert result.file_type == "xls"
+
+    def test_mismatched_mime_type_is_rejected(self):
+        result = validate_file(
+            b"%PDF-1.4\nstatement",
+            filename="statement.pdf",
+            content_type="image/jpeg",
+        )
         assert result.is_valid is False
-        assert result.file_type is None
-        assert "not supported" in (result.error or "").lower()
-        assert ".xlsx" in (result.error or "")
+        assert "content type" in (result.error or "").lower()
 
     # 3. File size enforcement
     def test_empty_file_rejected(self):
@@ -259,4 +275,3 @@ class TestFileValidator:
         res_str = validate_file(str(test_file))
         assert res_str.is_valid is True
         assert res_str.safe_filename == "valid_statement.pdf"
-

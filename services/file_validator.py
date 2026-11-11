@@ -9,13 +9,19 @@ import os
 import re
 import io
 import zipfile
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
 
 
 # Constants
 MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15 MB
-SUPPORTED_EXTENSIONS = {".pdf", ".csv", ".xlsx"}
-SUPPORTED_FILE_TYPES = {"pdf", "csv", "xlsx"}
+MAX_IMAGE_PIXELS = 20_000_000
+XLS_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".csv", ".xls", ".xlsx", ".jpg", ".jpeg", ".png",
+}
+SUPPORTED_FILE_TYPES = {"pdf", "csv", "xls", "xlsx", "jpg", "jpeg", "png"}
+IMAGE_FILE_TYPES = {"jpg", "jpeg", "png"}
 
 # Known binary signatures that must NEVER be accepted as CSV
 BINARY_SIGNATURES = [
@@ -32,7 +38,7 @@ BINARY_SIGNATURES = [
     (b"\x1f\x8b", "GZIP compressed archive"),
     (b"\x42\x5a\x68", "BZIP2 compressed archive"),
     (b"\x52\x61\x72\x21\x1a\x07", "RAR archive"),
-    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "Legacy Microsoft Compound Document (.xls / .doc)"),
+    (XLS_SIGNATURE, "Legacy Microsoft Compound Document (.xls / .doc)"),
 ]
 
 
@@ -41,7 +47,10 @@ class FileValidationResult(BaseModel):
     Structured outcome of file validation.
     """
     is_valid: bool = Field(description="Whether the file passed all validation checks")
-    file_type: Optional[str] = Field(default=None, description="Normalized file type: 'pdf', 'csv', or 'xlsx'")
+    file_type: Optional[str] = Field(
+        default=None,
+        description="Normalized file type: pdf, csv, xlsx, jpg, jpeg, or png",
+    )
     safe_filename: str = Field(description="Sanitized, safe filename with traversal components stripped")
     file_size: int = Field(default=0, description="Size of the file in bytes")
     error: Optional[str] = Field(default=None, description="Detailed explanation of failure if invalid")
@@ -98,7 +107,8 @@ class FileValidator:
     def validate(
         self,
         file_source: Union[str, Path, bytes, BinaryIO],
-        filename: Optional[str] = None
+        filename: Optional[str] = None,
+        content_type: Optional[str] = None,
     ) -> FileValidationResult:
         """
         Validates an uploaded file.
@@ -183,18 +193,10 @@ class FileValidator:
                 file_type=None,
                 safe_filename=safe_name,
                 file_size=file_size,
-                error="File has no extension. Supported formats are: .pdf, .csv, .xlsx.",
-                warnings=warnings
-            )
-
-        # Explicit rejection for legacy .xls with conversion guidance
-        if ext == ".xls":
-            return FileValidationResult(
-                is_valid=False,
-                file_type=None,
-                safe_filename=safe_name,
-                file_size=file_size,
-                error="Legacy Excel format (.xls) is not supported. Please convert the statement to modern Excel format (.xlsx) or export as CSV/PDF.",
+                error=(
+                    "File has no extension. Supported formats are: "
+                    ".pdf, .csv, .xlsx, .jpg, .jpeg, and .png."
+                ),
                 warnings=warnings
             )
 
@@ -211,13 +213,30 @@ class FileValidator:
 
         file_type = ext.lstrip(".")
 
+        mime_error = self._validate_mime_type(content_type, file_type)
+        if mime_error:
+            return FileValidationResult(
+                is_valid=False,
+                file_type=file_type,
+                safe_filename=safe_name,
+                file_size=file_size,
+                error=mime_error,
+                warnings=warnings,
+            )
+
         # 7. Validate magic bytes / file signature & internal structure
         if file_type == "pdf":
             sig_valid, sig_err = self._validate_pdf_signature(raw_bytes)
         elif file_type == "xlsx":
             sig_valid, sig_err = self._validate_xlsx_signature(raw_bytes)
+        elif file_type == "xls":
+            sig_valid, sig_err = self._validate_xls_signature(raw_bytes)
         elif file_type == "csv":
             sig_valid, sig_err = self._validate_csv_content(raw_bytes)
+        elif file_type in IMAGE_FILE_TYPES:
+            sig_valid, sig_err = self._validate_image_content(
+                raw_bytes, expected_type=file_type
+            )
         else:
             sig_valid = False
             sig_err = f"Unknown file type: {file_type}"
@@ -240,6 +259,33 @@ class FileValidator:
             error=None,
             warnings=warnings
         )
+
+    @staticmethod
+    def _validate_mime_type(
+        content_type: Optional[str], file_type: str
+    ) -> Optional[str]:
+        if not content_type:
+            return None
+        mime_type = content_type.split(";", 1)[0].strip().lower()
+        if mime_type in {"application/octet-stream", "application/binary"}:
+            return None
+        expected = {
+            "pdf": {"application/pdf"},
+            "csv": {"text/csv", "application/csv", "application/vnd.ms-excel"},
+            "xls": {"application/vnd.ms-excel"},
+            "xlsx": {
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            },
+            "jpg": {"image/jpeg"},
+            "jpeg": {"image/jpeg"},
+            "png": {"image/png"},
+        }
+        if mime_type not in expected[file_type]:
+            return (
+                f"Uploaded content type '{mime_type}' does not match the "
+                f".{file_type} file extension."
+            )
+        return None
 
     def _read_bytes_safely(
         self,
@@ -321,6 +367,44 @@ class FileValidator:
 
         return True, None
 
+    @staticmethod
+    def _validate_xls_signature(raw_bytes: bytes) -> Tuple[bool, Optional[str]]:
+        if not raw_bytes.startswith(XLS_SIGNATURE):
+            return False, "File content does not match legacy Excel (.xls) format."
+        try:
+            import xlrd
+
+            workbook = xlrd.open_workbook(file_contents=raw_bytes, on_demand=True)
+            has_sheets = workbook.nsheets > 0
+            workbook.release_resources()
+            if not has_sheets:
+                return False, "Excel workbook contains no worksheets."
+        except ImportError:
+            return False, "Legacy Excel support is unavailable; install the xlrd dependency."
+        except Exception:
+            return False, "Invalid or corrupted legacy Excel (.xls) file."
+        return True, None
+
+    @staticmethod
+    def _validate_image_content(
+        raw_bytes: bytes, expected_type: str
+    ) -> Tuple[bool, Optional[str]]:
+        expected_format = "JPEG" if expected_type in {"jpg", "jpeg"} else "PNG"
+        try:
+            with Image.open(io.BytesIO(raw_bytes)) as image:
+                if image.format != expected_format:
+                    return False, (
+                        f"File content does not match {expected_type.upper()} format."
+                    )
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    return False, "Image dimensions exceed the supported OCR limit."
+                image.verify()
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError):
+            return False, (
+                f"Invalid or unreadable {expected_type.upper()} image file."
+            )
+        return True, None
+
     def _validate_csv_content(self, raw_bytes: bytes) -> Tuple[bool, Optional[str]]:
         """
         Validates that CSV content is plain text and not a renamed binary file.
@@ -364,10 +448,13 @@ class FileValidator:
 def validate_file(
     file_source: Union[str, Path, bytes, BinaryIO],
     filename: Optional[str] = None,
-    max_size_bytes: int = MAX_FILE_SIZE_BYTES
+    max_size_bytes: int = MAX_FILE_SIZE_BYTES,
+    content_type: Optional[str] = None,
 ) -> FileValidationResult:
     """
     Convenience function to validate an uploaded statement file.
     """
     validator = FileValidator(max_size_bytes=max_size_bytes)
-    return validator.validate(file_source, filename=filename)
+    return validator.validate(
+        file_source, filename=filename, content_type=content_type
+    )

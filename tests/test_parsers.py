@@ -15,10 +15,161 @@ from services.csv_parser import CSVParser, parse_csv
 from services.excel_parser import ExcelParser, parse_excel
 from services.pdf_parser import PDFParser, is_scanned_pdf, parse_pdf
 from models.transaction import Transaction, ExtractionResult
+from services.transaction_normalizer import (
+    extract_currency,
+    correct_dates_from_leading_descriptions,
+    generate_transaction_id,
+    infer_date_convention,
+    normalize_date,
+    parse_numeric_amount,
+)
+
+
+class TestTransactionDateNormalization:
+    def test_ambiguous_date_is_not_guessed_from_currency(self):
+        convention, warnings = infer_date_convention(
+            ["05/06/2024"], currency="LKR"
+        )
+
+        assert convention is None
+        assert normalize_date("05/06/2024", dayfirst=convention) is None
+        assert any("will be skipped" in warning for warning in warnings)
+
+    @pytest.mark.parametrize("partial_date", ["Jan 5", "January 2024", "2024-01"])
+    def test_partial_date_does_not_get_missing_components_invented(self, partial_date):
+        assert normalize_date(partial_date) is None
+
+    @pytest.mark.parametrize(
+        ("complete_date", "expected"),
+        [
+            ("5 Jan 2024", "2024-01-05"),
+            ("2024-01-05 13:15:00", "2024-01-05"),
+            ("13/04/2024", "2024-04-13"),
+        ],
+    )
+    def test_complete_unambiguous_date_formats_are_preserved(
+        self, complete_date, expected
+    ):
+        assert normalize_date(complete_date) == expected
+
+    def test_leading_description_dates_use_statement_day_first_evidence(self):
+        transactions = [
+            Transaction(
+                transaction_id="dmy-anchor",
+                transaction_date="2021-05-31",
+                description="31-05-2021 Anchor",
+                amount=10,
+                currency=None,
+                transaction_type="expense",
+            ),
+            Transaction(
+                transaction_id="dmy-ambiguous",
+                transaction_date="2021-06-02",
+                description="06-02-2021 Purchase",
+                amount=10,
+                currency=None,
+                transaction_type="expense",
+            ),
+        ]
+
+        correct_dates_from_leading_descriptions(transactions)
+
+        assert transactions[1].transaction_date == "2021-02-06"
+
+    def test_leading_ambiguous_description_date_is_not_guessed(self):
+        transaction = Transaction(
+            transaction_id="ambiguous",
+            transaction_date="2021-01-06",
+            description="06-01-2021 Purchase",
+            amount=10,
+            currency=None,
+            transaction_type="expense",
+        )
+
+        correct_dates_from_leading_descriptions([transaction])
+
+        assert transaction.transaction_date == "2021-01-06"
 
 
 class TestCSVParser:
     """Test suite for CSV bank statement parsing."""
+
+    @pytest.mark.parametrize(
+        ("currency_text", "expected"),
+        [
+            ("USD 1,234.56", "USD"),
+            ("EUR 1.234,56", "EUR"),
+            ("GBP 1,234.56", "GBP"),
+            ("INR 1,234.56", "INR"),
+            ("AED 1,234.56", "AED"),
+            ("AUD 1,234.56", "AUD"),
+            ("CAD 1,234.56", "CAD"),
+            ("JPY 1,234", "JPY"),
+            ("LKR 1,234.56", "LKR"),
+            ("CHF 1'234.56", "CHF"),
+            ("€ 1.234,56", "EUR"),
+            ("£1,234.56", "GBP"),
+            ("₹1,234.56", "INR"),
+            ("US$1,234.56", "USD"),
+            ("A$1,234.56", "AUD"),
+            ("C$1,234.56", "CAD"),
+            ("د.إ 1,234.56", "AED"),
+            ("United Arab Emirates Dirham", "AED"),
+        ],
+    )
+    def test_currency_detection_normalizes_explicit_formats(
+        self, currency_text, expected
+    ):
+        assert extract_currency(currency_text) == expected
+
+    @pytest.mark.parametrize(
+        "ambiguous_currency", ["$1,234.56", "¥1,234", "Rs. 1,234.56"]
+    )
+    def test_ambiguous_currency_markers_are_not_guessed(self, ambiguous_currency):
+        assert extract_currency(ambiguous_currency) is None
+
+    def test_currency_detection_does_not_treat_common_words_as_currency_codes(self):
+        assert extract_currency("All accounts are shown below") is None
+
+    @pytest.mark.parametrize(
+        ("raw_amount", "expected"),
+        [
+            ("USD 1,234.56", 1234.56),
+            ("EUR 1.234,56", 1234.56),
+            ("LKR 1,234.56", 1234.56),
+            ("AED 1,234", 1234.0),
+            ("US$1,234.56", 1234.56),
+            ("CHF 1'234.56", 1234.56),
+        ],
+    )
+    def test_currency_number_formats_parse_without_separator_confusion(
+        self, raw_amount, expected
+    ):
+        amount, _, _ = parse_numeric_amount(raw_amount)
+        assert amount == expected
+
+    def test_transaction_fingerprint_uses_financial_identity_fields(self):
+        first_id = generate_transaction_id(
+            "first.csv", 0, "2024-01-01", "  Market   purchase ", 10.0,
+            "expense", "LKR",
+        )
+
+        assert first_id == generate_transaction_id(
+            "first.csv", 0, "2024-01-01", "market purchase", 10.0,
+            "expense", "lkr",
+        )
+        assert first_id != generate_transaction_id(
+            "first.csv", 0, "2024-01-01", "market purchase", 10.0,
+            "income", "LKR",
+        )
+        assert first_id != generate_transaction_id(
+            "first.csv", 0, "2024-01-01", "market purchase", 10.0,
+            "expense", "USD",
+        )
+        assert first_id != generate_transaction_id(
+            "first.csv", 1, "2024-01-01", "market purchase", 10.0,
+            "expense", "LKR",
+        )
 
     def test_standard_csv_with_signed_amounts(self):
         """Test standard comma-delimited CSV with single Amount column."""
@@ -52,9 +203,18 @@ class TestCSVParser:
         assert t2.transaction_type == "income"
         assert t2.balance == 4914.50
 
+    def test_csv_without_explicit_currency_keeps_currency_null(self):
+        csv_data = b"Date,Description,Amount\n2026-03-01,Local Store,-12.50\n"
+        result = parse_csv(csv_data, filename="no_currency.csv")
+
+        assert result.success is True
+        assert len(result.transactions) == 1
+        assert result.transactions[0].currency is None
+
     def test_csv_with_separate_debit_credit_columns(self):
         """Test CSV with separate Debit and Credit columns and currency symbol."""
-        csv_data = """Transaction Date,Details,Debit,Credit,Balance
+        csv_data = """Currency: USD
+Transaction Date,Details,Debit,Credit,Balance
 15/01/2024,Coffee Shop,$4.50,,1000.00
 16/01/2024,Freelance Payment,,$500.00,1500.00
 17/01/2024,Bookstore Purchase,$29.99,,1470.01
@@ -84,7 +244,9 @@ class TestCSVParser:
 01.02.2024;Internet Provider;45,50;;954,50
 05.02.2024;Tax Refund;;250,00;1204,50
 """
-        result = parse_csv(csv_data.encode("utf-8"), filename="european.csv")
+        result = parse_csv(
+            csv_data.encode("utf-8"), filename="european.csv", dayfirst=True
+        )
 
         assert result.success is True
         assert result.total_transactions == 2
@@ -92,6 +254,18 @@ class TestCSVParser:
         assert result.transactions[0].transaction_type == "expense"
         assert result.transactions[1].amount == 250.00
         assert result.transactions[1].transaction_type == "income"
+
+    def test_csv_skips_ambiguous_dates_without_convention(self):
+        csv_data = (
+            "Date,Description,Amount\n"
+            "05/06/2024,Ambiguous purchase,-10.00\n"
+        )
+
+        result = parse_csv(csv_data.encode("utf-8"), filename="ambiguous.csv")
+
+        assert result.success is True
+        assert result.transactions == []
+        assert any("will be skipped" in warning for warning in result.warnings)
 
     def test_csv_with_metadata_headers(self):
         """Test CSV where transaction table starts after metadata/summary lines."""
@@ -171,6 +345,46 @@ Thank you for banking with us,,
         assert result.transactions[0].description == "Gas Station"
         assert result.transactions[1].description == "Supermarket"
 
+    def test_description_based_categories_and_transfer_type(self):
+        csv_data = """Date,Description,Amount
+2026-03-01,Monthly Payroll,150000.00
+2026-03-02,Keells Supermarket,-2500.00
+2026-03-03,PickMe ride,-850.00
+2026-03-04,Dialog utility bill,-1800.00
+2026-03-05,Daraz shopping,-3200.00
+2026-03-06,City pharmacy,-450.00
+2026-03-07,Bank service fee,-50.00
+2026-03-08,Internal transfer,-1000.00
+"""
+        result = parse_csv(csv_data.encode("utf-8"), filename="categories.csv")
+
+        assert result.success is True
+        assert [txn.category for txn in result.transactions] == [
+            "Salary",
+            "Food",
+            "Transport",
+            "Utilities",
+            "Shopping",
+            "Healthcare",
+            "Fees",
+            "Transfer",
+        ]
+        assert result.transactions[0].transaction_type == "income"
+        assert result.transactions[-1].transaction_type == "transfer"
+
+    def test_rows_with_both_debit_and_credit_values_are_rejected(self):
+        csv_data = """Date,Description,Debit,Credit,Balance
+2026-03-01,Malformed row,100.00,200.00,1100.00
+2026-03-02,Valid debit,25.00,,1075.00
+"""
+        result = parse_csv(csv_data.encode("utf-8"), filename="bad_columns.csv")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].description == "Valid debit"
+        assert result.transactions[0].transaction_type == "expense"
+        assert any("skipped" in warning.lower() for warning in result.warnings)
+
     def test_tsv_and_pipe_delimited(self):
         """Test tab-separated (TSV) and pipe-separated bank files."""
         tsv_data = "Posting Date\tPayee\tAmount\n2024-03-01\tCoffee Roasters\t-4.75\n"
@@ -220,6 +434,49 @@ Thank you for banking with us,,
         # 85.20 DR -> expense
         assert result.transactions[2].amount == 85.20
         assert result.transactions[2].transaction_type == "expense"
+
+    def test_explicit_amount_direction_overrides_description_keywords(self):
+        csv_data = """Date,Description,Amount
+2024-01-16,Consulting Fee,1200.00 CR
+2024-01-17,International transfer,-250.00
+2024-01-18,Service Fee,+12.00
+"""
+        result = parse_csv(csv_data.encode("utf-8"), filename="directions.csv")
+
+        assert result.success is True
+        assert [txn.transaction_type for txn in result.transactions] == [
+            "income",
+            "expense",
+            "income",
+        ]
+
+    def test_zero_amount_is_rejected_with_warning(self):
+        csv_data = """Date,Description,Amount
+2024-01-01,Zero amount,0.00
+2024-01-02,Valid purchase,-5.00
+"""
+        result = parse_csv(csv_data.encode("utf-8"), filename="zero.csv")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].description == "Valid purchase"
+        assert any("skipped" in warning.lower() for warning in result.warnings)
+
+    def test_invalid_amount_text_is_rejected_instead_of_sanitized(self):
+        csv_data = """Date,Description,Amount
+2024-01-01,Corrupted amount,USD 1O0
+2024-01-02,Combined columns,100 200
+2024-01-03,Misgrouped amount,12.34.56
+2024-01-04,Valid amount,"LKR 1,000.00"
+"""
+        result = parse_csv(csv_data.encode("utf-8"), filename="invalid-amount.csv")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].description == "Valid amount"
+        assert result.transactions[0].amount == 1000.0
+        assert result.transactions[0].currency == "LKR"
+        assert any("skipped" in warning.lower() for warning in result.warnings)
 
     def test_category_and_currency_preservation(self):
         """Test that explicit category and currency columns are preserved."""
@@ -605,14 +862,13 @@ class TestExcelParser:
         assert result2.success is False
         assert "required" in (result2.error or "").lower()
 
-    def test_legacy_xls_unsupported_error(self):
-        """Test explicit error and zero transactions when legacy .xls file is uploaded."""
+    def test_corrupted_legacy_xls_error(self):
+        """Test malformed legacy .xls content is rejected without transactions."""
         result = parse_excel(b"FakeLegacyXlsContent", filename="statement.xls")
         assert result.success is False
         assert result.total_transactions == 0
         assert len(result.transactions) == 0
-        assert "not supported" in (result.error or "").lower()
-        assert ".xlsx" in (result.error or "")
+        assert "legacy excel" in (result.error or "").lower()
 
     def test_xlsx_canonical_schema_serialization(self):
         """Test that model_dump() strictly outputs the 8 canonical fields for Excel extractions."""
@@ -887,6 +1143,83 @@ class TestPDFParser:
         assert t3.transaction_type == "expense"
         assert t3.balance == 4794.50
 
+    def test_pdf_reference_table_returns_only_fourteen_transactions(self, monkeypatch):
+        headers = [
+            "Date", "Description", "Currency", "Reference",
+            "Debit", "Credit", "Balance",
+        ]
+        entries = [
+            ("Grocery Store", "expense", 1250.00),
+            ("Mobile Reload", "expense", 500.00),
+            ("Online Shopping", "expense", 7500.00),
+            ("Monthly Salary", "income", 125000.00),
+            ("Fuel Station", "expense", 3200.00),
+            ("Water Bill", "expense", 1800.00),
+            ("Coffee Shop", "expense", 650.00),
+            ("Pharmacy", "expense", 2100.00),
+            ("Client Payment", "income", 24000.00),
+            ("Restaurant", "expense", 3400.00),
+            ("Internet Bill", "expense", 4500.00),
+            ("Book Shop", "expense", 2750.00),
+            ("Taxi Fare", "expense", 1200.00),
+            ("Electricity Bill", "expense", 6200.00),
+        ]
+        running_balance = 100000.00
+        rows = []
+        expected = []
+        for day, (description, transaction_type, amount) in enumerate(entries, start=1):
+            debit = f"{amount:.2f}" if transaction_type == "expense" else ""
+            credit = f"{amount:.2f}" if transaction_type == "income" else ""
+            running_balance += amount if transaction_type == "income" else -amount
+            rows.append([
+                f"2026-03-{day:02d}",
+                description,
+                "LKR",
+                f"260300{day:02d}",
+                debit,
+                credit,
+                f"{running_balance:.2f}",
+            ])
+            expected.append((description, amount, transaction_type, running_balance))
+
+        fallback_inputs = {}
+        original_positioned = PDFParser._extract_from_positioned_words
+        original_text = PDFParser._extract_from_text
+
+        def capture_positioned(self, pages_words, *args, **kwargs):
+            fallback_inputs["positioned"] = pages_words
+            return original_positioned(self, pages_words, *args, **kwargs)
+
+        def capture_text(self, pages_text, *args, **kwargs):
+            fallback_inputs["text"] = pages_text
+            return original_text(self, pages_text, *args, **kwargs)
+
+        monkeypatch.setattr(PDFParser, "_extract_from_positioned_words", capture_positioned)
+        monkeypatch.setattr(PDFParser, "_extract_from_text", capture_text)
+        pdf_bytes = create_test_table_pdf(
+            headers,
+            rows,
+            col_widths=[60.0, 130.0, 55.0, 65.0, 60.0, 60.0, 70.0],
+        )
+
+        result = parse_pdf(pdf_bytes, filename="fourteen_transactions.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 14
+        assert fallback_inputs == {"positioned": [], "text": []}
+        assert [
+            (
+                transaction.description,
+                transaction.amount,
+                transaction.transaction_type,
+                transaction.balance,
+            )
+            for transaction in result.transactions
+        ] == expected
+        assert all(transaction.currency == "LKR" for transaction in result.transactions)
+        assert result.transactions[1].category == "Utilities"
+        assert result.transactions[2].category == "Shopping"
+
     def test_pdf_table_with_signed_amounts(self):
         """Test structured table PDF with a single signed Amount column."""
         headers = ["Date", "Description", "Amount", "Balance"]
@@ -903,6 +1236,71 @@ class TestPDFParser:
         assert result.transactions[0].transaction_type == "expense"
         assert result.transactions[1].amount == 1200.00
         assert result.transactions[1].transaction_type == "income"
+
+    def test_pdf_ambiguous_currency_symbol_keeps_currency_null(self):
+        pdf_bytes = create_test_table_pdf(
+            ["Date", "Description", "Debit", "Credit", "Balance"],
+            [["2026-03-01", "Local Store", "$12.50", "", "$987.50"]],
+        )
+
+        result = parse_pdf(pdf_bytes, filename="ambiguous_currency.pdf")
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        assert result.transactions[0].amount == 12.50
+        assert result.transactions[0].currency is None
+
+    def test_pdf_transaction_currency_does_not_leak_to_other_rows(self):
+        pdf_bytes = create_test_table_pdf(
+            ["Date", "Description", "Debit", "Credit", "Balance", "Currency"],
+            [
+                ["2026-03-01", "Unspecified Store", "12.50", "", "987.50", ""],
+                ["2026-03-02", "Euro Store", "10.00", "", "977.50", "EUR"],
+            ],
+        )
+
+        result = parse_pdf(pdf_bytes, filename="mixed_currency.pdf")
+
+        assert result.success is True
+        assert result.transactions[0].currency is None
+        assert result.transactions[1].currency == "EUR"
+
+    def test_pdf_text_columns_exclude_balance_and_infer_debit_credit(self):
+        lines = [
+            "Date Description Debit Credit Balance",
+            "2026-03-01 Opening Balance 1000.00 1000.00",
+            "2026-03-02 Keells Grocery 25.00 975.00",
+            "2026-03-03 Monthly Salary 500.00 1475.00",
+        ]
+        transactions, warnings = PDFParser()._extract_from_text(
+            ["\n".join(lines)], "text-columns.pdf", "LKR", None
+        )
+
+        assert warnings == []
+        assert len(transactions) == 2
+        assert transactions[0].amount == 25.00
+        assert transactions[0].balance == 975.00
+        assert transactions[0].transaction_type == "expense"
+        assert transactions[0].category == "Food"
+        assert transactions[1].amount == 500.00
+        assert transactions[1].balance == 1475.00
+        assert transactions[1].transaction_type == "income"
+        assert transactions[1].category == "Salary"
+
+    def test_pdf_text_parser_preserves_numeric_description_suffix(self):
+        transactions, warnings = PDFParser()._extract_from_text(
+            ["2024-01-01 Transaction 1 -1.00 9.00"],
+            "numeric-description.pdf",
+            None,
+            None,
+        )
+
+        assert warnings == []
+        assert len(transactions) == 1
+        assert transactions[0].description == "Transaction 1"
+        assert transactions[0].amount == 1.0
+        assert transactions[0].balance == 9.0
+        assert transactions[0].transaction_type == "expense"
 
     def test_pdf_prefers_structured_row_over_conflicting_fallback(self):
         structured = Transaction(
@@ -1080,7 +1478,7 @@ class TestPDFParser:
         page_tables = [
             (
                 ["Date", "Description", "Debit", "Credit", "Balance"],
-                [["2024-11-06", "Card purchase", "$12.50", "", "$987.50"]],
+                [["2024-11-06", "Card purchase", "USD $12.50", "", "$987.50"]],
                 {},
             ),
             (
@@ -1420,6 +1818,23 @@ class TestPDFParser:
         result_monthfirst = parse_pdf(pdf_bytes, filename="ambig.pdf", dayfirst=False)
         assert result_monthfirst.success is True
         assert result_monthfirst.transactions[0].transaction_date == "2024-05-06"
+
+    def test_pdf_corrects_inconsistent_date_from_leading_description(self):
+        lines = [
+            "2021-01-06 05-31-2021 Grocery purchase -10.00 90.00",
+            "2021-01-06 06-01-2021 Transit purchase -5.00 85.00",
+        ]
+        result = parse_pdf(
+            create_test_text_pdf(lines), filename="leading-description-date.pdf"
+        )
+
+        assert result.success is True
+        assert [
+            transaction.transaction_date for transaction in result.transactions
+        ] == ["2021-05-31", "2021-06-01"]
+        assert [
+            transaction.description for transaction in result.transactions
+        ] == ["05-31-2021 Grocery purchase", "06-01-2021 Transit purchase"]
 
     def test_pdf_summary_and_header_lines_skipped_safely(self):
         """Test that bank header and summary lines are safely ignored with warnings."""

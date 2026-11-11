@@ -30,6 +30,7 @@ from sqlalchemy.orm import sessionmaker
 from api.upload import upload_statement as extract_statement
 from app.database import crud
 from app.database.database import SessionLocal
+from app.models.upload_claim import StatementUploadClaim
 from app.models.upload_job import UploadJob
 from app.services.analytics_engine import (
     compute_category_spending,
@@ -41,8 +42,9 @@ from app.services.budget_engine import (
     generate_suggested_budgets,
 )
 from app.services.savings_engine import calculate_savings_recommendations
-from services.file_validator import MAX_FILE_SIZE_BYTES
+from services.file_validator import MAX_FILE_SIZE_BYTES, validate_file
 from services.pdf_parser import is_scanned_pdf, ocr_stage_callback
+from services.transaction_normalizer import correct_dates_from_leading_descriptions
 
 router = APIRouter(tags=["Team Integrations"])
 logger = logging.getLogger(__name__)
@@ -90,16 +92,38 @@ async def _upload_statement(file: UploadFile, user_id: str) -> dict[str, Any] | 
     upload_bytes = await file.read(MAX_FILE_SIZE_BYTES + 1)
     await file.seek(0)
     job_id: Optional[str] = None
+    validation = validate_file(
+        upload_bytes,
+        filename=filename,
+        content_type=file.content_type,
+    )
+    if not validation.is_valid:
+        status_code = (
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE
+            if validation.file_size > MAX_FILE_SIZE_BYTES
+            else status.HTTP_400_BAD_REQUEST
+        )
+        await file.close()
+        return _statement_processing_error(
+            validation.safe_filename,
+            status_code,
+            validation.error or "Uploaded statement failed validation.",
+            file_type=validation.file_type or "unknown",
+            warnings=validation.warnings,
+        )
+    filename = validation.safe_filename
+    file_type = validation.file_type or "unknown"
     if len(upload_bytes) <= MAX_FILE_SIZE_BYTES:
         content_hash = hashlib.sha256(upload_bytes).hexdigest()
         job, claimed = _claim_statement_upload(user_id, filename, content_hash)
         if not claimed:
+            await file.close()
             return _existing_statement_upload_response(job)
         job_id = job.id
 
     try:
         if (
-            filename.lower().endswith(".pdf")
+            file_type == "pdf"
             and len(upload_bytes) <= MAX_FILE_SIZE_BYTES
             and job_id is not None
         ):
@@ -148,7 +172,15 @@ async def _upload_statement(file: UploadFile, user_id: str) -> dict[str, Any] | 
                 )
             if scanned:
                 await file.close()
-                return _enqueue_ocr_job(upload_bytes, filename, user_id, job_id)
+                return _enqueue_ocr_job(
+                    upload_bytes, filename, user_id, job_id, file_type
+                )
+
+        if file_type in {"jpg", "jpeg", "png"} and job_id is not None:
+            await file.close()
+            return _enqueue_ocr_job(
+                upload_bytes, filename, user_id, job_id, file_type
+            )
 
         extraction_response = await run_in_threadpool(
             _extract_and_save, file, user_id, job_id
@@ -185,31 +217,38 @@ def _claim_statement_upload(
 ) -> tuple[UploadJob, bool]:
     db = SessionLocal()
     try:
-        job = UploadJob(
-            id=str(uuid4()),
-            user_id=user_id,
-            filename=filename,
-            content_hash=content_hash,
-            status="processing",
-        )
-        db.add(job)
-        try:
-            db.commit()
-            db.refresh(job)
-            return job, True
-        except IntegrityError:
-            db.rollback()
-
-        job = (
-            db.query(UploadJob)
-            .filter(
-                UploadJob.user_id == user_id,
-                UploadJob.content_hash == content_hash,
+        claim = db.get(StatementUploadClaim, (user_id, content_hash))
+        if claim is None:
+            job = UploadJob(
+                id=str(uuid4()),
+                user_id=user_id,
+                filename=filename,
+                content_hash=content_hash,
+                status="processing",
             )
-            .first()
-        )
+            claim = StatementUploadClaim(
+                user_id=user_id,
+                content_hash=content_hash,
+                job_id=job.id,
+            )
+            db.add_all((job, claim))
+            try:
+                db.commit()
+                db.refresh(job)
+                return job, True
+            except IntegrityError:
+                db.rollback()
+                claim = db.get(StatementUploadClaim, (user_id, content_hash))
+                if claim is None:
+                    raise RuntimeError(
+                        "Could not claim this statement upload safely."
+                    )
+
+        job = db.query(UploadJob).filter(UploadJob.id == claim.job_id).first()
         if job is None:
-            raise RuntimeError("Statement upload idempotency record was not found.")
+            raise RuntimeError(
+                "Statement upload claim refers to a missing upload job."
+            )
         if job.status != "failed":
             return job, False
 
@@ -228,7 +267,6 @@ def _claim_statement_upload(
             )
         )
         db.commit()
-        db.expire_all()
         job = db.query(UploadJob).filter(UploadJob.id == job.id).one()
         return job, bool(updated)
     except Exception:
@@ -239,8 +277,11 @@ def _claim_statement_upload(
 
 
 def _existing_statement_upload_response(job: UploadJob) -> dict[str, Any] | Response:
-    if job.status == "completed" and not job.is_async and job.result_json:
-        return json.loads(job.result_json)
+    if job.status == "completed" and job.result_json:
+        result = json.loads(job.result_json)
+        if result.get("file_type") in {"jpg", "jpeg", "png", "pdf"}:
+            correct_dates_from_leading_descriptions(result.get("transactions", []))
+        return result
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
@@ -252,17 +293,21 @@ def _existing_statement_upload_response(job: UploadJob) -> dict[str, Any] | Resp
 
 
 def _statement_processing_error(
-    filename: str, status_code: int, error: str
+    filename: str,
+    status_code: int,
+    error: str,
+    file_type: str = "pdf",
+    warnings: Optional[list[str]] = None,
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={
             "success": False,
             "filename": filename,
-            "file_type": "pdf",
+            "file_type": file_type,
             "total_transactions": 0,
             "transactions": [],
-            "warnings": [],
+            "warnings": warnings or [],
             "error": error,
         },
     )
@@ -348,7 +393,9 @@ def _persist_extraction(
 def _extract_and_save(
     file: UploadFile, user_id: str, job_id: Optional[str] = None
 ) -> Response:
-    return _persist_extraction(extract_statement(file), user_id, job_id)
+    return _persist_extraction(
+        extract_statement(file, dayfirst=None), user_id, job_id
+    )
 
 
 def _extract_statement_in_child(
@@ -377,7 +424,7 @@ def _extract_statement_in_child(
     callback_token = ocr_stage_callback.set(report_stage)
     try:
         upload = StarletteUploadFile(filename=filename, file=io.BytesIO(pdf_bytes))
-        response = extract_statement(upload)
+        response = extract_statement(upload, dayfirst=None)
         connection.send(
             {
                 "type": "result",
@@ -761,6 +808,7 @@ def _run_isolated_extraction(
     filename: str,
     progress: dict[str, Any],
     progress_lock: threading.Lock,
+    file_type: str = "pdf",
 ) -> Response:
     extraction_started = time.monotonic()
 
@@ -814,7 +862,7 @@ def _run_isolated_extraction(
             stalled_page = progress.get("page_number")
         elapsed_seconds = time.monotonic() - extraction_started
         error = (
-            f"Scanned statement processing exceeded the {OCR_JOB_TIMEOUT} timeout "
+            f"Statement processing exceeded the {OCR_JOB_TIMEOUT} timeout "
             f"during stage '{stalled_stage}'. Please retry."
         )
         logger.error(
@@ -832,7 +880,7 @@ def _run_isolated_extraction(
         payload = {
             "success": False,
             "filename": filename,
-            "file_type": "pdf",
+            "file_type": file_type,
             "total_transactions": 0,
             "transactions": [],
             "warnings": [],
@@ -844,7 +892,7 @@ def _run_isolated_extraction(
         payload = {
             "success": False,
             "filename": filename,
-            "file_type": "pdf",
+            "file_type": file_type,
             "total_transactions": 0,
             "transactions": [],
             "warnings": [],
@@ -858,20 +906,24 @@ def _run_isolated_extraction(
 
 
 def _enqueue_ocr_job(
-    pdf_bytes: bytes, filename: str, user_id: str, job_id: str
+    pdf_bytes: bytes,
+    filename: str,
+    user_id: str,
+    job_id: str,
+    file_type: str = "pdf",
 ) -> JSONResponse:
     if not _ocr_job_slots.acquire(blocking=False):
         _update_ocr_job(
             job_id,
             status_value="failed",
-            error="Scanned statement processing queue is full. Please retry.",
+            error="Statement processing queue is full. Please retry.",
             expected_status=("processing",),
         )
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={
                 "status": "error",
-                "message": "Scanned statement processing is busy. Please retry shortly.",
+                "message": "Statement processing is busy. Please retry shortly.",
             },
             headers={"Retry-After": "30"},
         )
@@ -886,10 +938,10 @@ def _enqueue_ocr_job(
     except Exception as exc:
         db.rollback()
         _ocr_job_slots.release()
-        logger.exception("Failed to create scanned statement job")
+        logger.exception("Failed to create statement upload job")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Could not queue scanned statement for processing.",
+            detail="Could not queue statement for processing.",
         ) from exc
     finally:
         db.close()
@@ -903,7 +955,7 @@ def _enqueue_ocr_job(
     }
     try:
         logger.info(
-            "Queued scanned statement job",
+            "Queued statement processing job",
             extra={
                 "job_id": job_id,
                 "source_filename": filename,
@@ -918,6 +970,7 @@ def _enqueue_ocr_job(
             user_id,
             progress,
             progress_lock,
+            file_type,
         )
     except Exception as exc:
         _ocr_job_slots.release()
@@ -926,17 +979,17 @@ def _enqueue_ocr_job(
             status_value="failed",
             error="Scanned statement could not be queued for processing.",
         )
-        logger.exception("Failed to submit scanned statement job %s", job_id)
+        logger.exception("Failed to submit statement job %s", job_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Scanned statement processing is temporarily unavailable.",
+            detail="Statement processing is temporarily unavailable.",
         ) from exc
 
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={
             "status": "processing",
-            "message": "Scanned statement accepted for background processing.",
+            "message": "Statement accepted for background processing.",
             "data": {"job_id": job_id, "status": "queued"},
         },
     )
@@ -1041,12 +1094,13 @@ def _process_ocr_job(
     user_id: str,
     progress: dict[str, Any],
     progress_lock: threading.Lock,
+    file_type: str = "pdf",
 ) -> None:
     job_started = time.monotonic()
     try:
         _record_job_stage(progress, progress_lock, "job_dequeued")
         logger.info(
-            "Scanned statement worker dequeued job",
+            "Statement worker dequeued job",
             extra={
                 "job_id": job_id,
                 "source_filename": filename,
@@ -1072,9 +1126,14 @@ def _process_ocr_job(
                 "elapsed_seconds": round(time.monotonic() - job_started, 3),
             },
         )
-        extraction_response = _run_isolated_extraction(
-            pdf_bytes, filename, progress, progress_lock
-        )
+        if file_type == "pdf":
+            extraction_response = _run_isolated_extraction(
+                pdf_bytes, filename, progress, progress_lock
+            )
+        else:
+            extraction_response = _run_isolated_extraction(
+                pdf_bytes, filename, progress, progress_lock, file_type
+            )
         result = json.loads(extraction_response.body)
         _record_job_stage(progress, progress_lock, "extraction_completed")
         logger.info(
@@ -1232,7 +1291,7 @@ def _process_ocr_job(
     "/upload-status/{job_id}",
     response_model=ApiResponseEnvelope,
     summary="Get statement upload status",
-    description="Poll the status of an asynchronously processed scanned PDF upload.",
+    description="Poll the status of a scanned PDF or statement image processed asynchronously.",
 )
 async def get_upload_status(
     job_id: str,
@@ -1257,7 +1316,12 @@ async def get_upload_status(
             "filename": job.filename,
         }
         if job.result_json:
-            data["result"] = json.loads(job.result_json)
+            result = json.loads(job.result_json)
+            if result.get("file_type") in {"jpg", "jpeg", "png", "pdf"}:
+                correct_dates_from_leading_descriptions(
+                    result.get("transactions", [])
+                )
+            data["result"] = result
         if job.error:
             data["error"] = job.error
         return ApiResponseEnvelope(
@@ -1356,14 +1420,19 @@ def _not_implemented_response(module_name: str, responsible_member: str) -> None
     "/upload-statement",
     response_model=ApiResponseEnvelope,
     responses={
-        202: {"description": "Scanned PDF accepted for background processing."},
-        503: {"description": "Scanned PDF processing queue is full or unavailable."},
+        202: {"description": "Scanned PDF or statement image accepted for background processing."},
+        503: {"description": "Statement processing queue is full or unavailable."},
     },
     summary="Upload Statement (Member 1)",
-    description="Accepts PDF, CSV, or Excel bank statements for extraction.",
+    description=(
+        "Accepts PDF, CSV, XLS, XLSX, JPG, JPEG, or PNG bank statements for extraction."
+    ),
 )
 async def upload_statement(
-    file: UploadFile = File(..., description="Bank statement file (.pdf, .csv, .xlsx)"),
+    file: UploadFile = File(
+        ...,
+        description="Bank statement file (.pdf, .csv, .xls, .xlsx, .jpg, .jpeg, .png)",
+    ),
     user_id: str = Query(default="demo_user", description="User ID associated with the statement"),
 ):
     if registry.member1_upload_handler:

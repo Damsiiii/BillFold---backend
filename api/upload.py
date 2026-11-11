@@ -1,7 +1,7 @@
 """
 API endpoint for bank statement upload and transaction extraction.
 Tharanya's Module: Statement Upload & Data Extraction.
-Provides POST /api/upload for uploading PDF, CSV, and XLSX statements,
+Provides POST /api/upload for uploading PDF, CSV, XLS, XLSX, and statement images,
 validating file security, format, size, and dispatching to canonical parsers.
 """
 import logging
@@ -14,6 +14,7 @@ from services.file_validator import validate_file, sanitize_filename
 from services.pdf_parser import parse_pdf
 from services.csv_parser import parse_csv
 from services.excel_parser import parse_excel
+from services.image_parser import parse_image
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["Statement Upload"])
@@ -30,10 +31,16 @@ router = APIRouter(prefix="/api", tags=["Statement Upload"])
         500: {"description": "Internal server error during extraction", "model": ExtractionResult},
     },
     summary="Upload and extract bank statement transactions",
-    description="Accepts a PDF, CSV, or XLSX bank statement file, validates it, and extracts normalized transactions into the project canonical schema."
+    description=(
+        "Accepts a PDF, CSV, XLS, XLSX, JPG, JPEG, or PNG bank statement, validates "
+        "the file, and extracts normalized transactions into the canonical schema."
+    )
 )
 def upload_statement(
-    file: UploadFile = File(..., description="Bank statement file (.pdf, .csv, .xlsx)"),
+    file: UploadFile = File(
+        ...,
+        description="Bank statement file (.pdf, .csv, .xls, .xlsx, .jpg, .jpeg, .png)",
+    ),
     dayfirst: Optional[bool] = Query(
         default=None,
         description="Explicit date convention override: True for DD/MM/YYYY, False for MM/DD/YYYY"
@@ -47,7 +54,11 @@ def upload_statement(
 
     try:
         # 1. Validate uploaded file using services/file_validator.py
-        validation = validate_file(file.file, filename=file.filename)
+        validation = validate_file(
+            file.file,
+            filename=file.filename,
+            content_type=file.content_type,
+        )
 
         if not validation.is_valid:
             # Distinguish between file size limit (413) and general invalid request (400)
@@ -77,6 +88,15 @@ def upload_statement(
             result = parse_csv(file.file, filename=validated_name, dayfirst=dayfirst)
         elif file_type == "xlsx":
             result = parse_excel(file.file, filename=validated_name, dayfirst=dayfirst)
+        elif file_type == "xls":
+            result = parse_excel(file.file, filename=validated_name, dayfirst=dayfirst)
+        elif file_type in {"jpg", "jpeg", "png"}:
+            result = parse_image(
+                file.file,
+                filename=validated_name,
+                file_type=file_type,
+                dayfirst=dayfirst,
+            )
         else:
             # Defensive guard
             err_result = ExtractionResult(
@@ -86,7 +106,10 @@ def upload_statement(
                 total_transactions=0,
                 transactions=[],
                 warnings=[],
-                error=f"Unsupported file type: '{file_type}'. Supported formats: .pdf, .csv, .xlsx",
+                error=(
+                    f"Unsupported file type: '{file_type}'. Supported formats: "
+                    ".pdf, .csv, .xls, .xlsx, .jpg, .jpeg, .png"
+                ),
             )
             return JSONResponse(status_code=400, content=err_result.model_dump())
 

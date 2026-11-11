@@ -23,7 +23,9 @@ class Transaction(BaseModel):
     transaction_id: str = Field(..., description="Unique transaction record identifier")
     transaction_date: str = Field(..., description="Standardized transaction date (YYYY-MM-DD)")
     description: str = Field(..., description="Normalized transaction description")
-    amount: float = Field(..., ge=0.0, description="Normalized numeric transaction amount (positive float)")
+    amount: float = Field(
+        ..., gt=0.0, description="Normalized numeric transaction amount (positive float)"
+    )
     currency: Optional[str] = Field(default=None, description="ISO currency code, where known (e.g. USD, LKR, INR)")
     transaction_type: str = Field(default="unknown", description="Transaction type: income, expense, transfer, or unknown")
     category: Optional[str] = Field(default="Unknown", description="Spending category if identified, or Unknown")
@@ -63,4 +65,3 @@ class ExtractionResult(BaseModel):
     transactions: List[Transaction] = Field(default_factory=list, description="Extracted canonical transactions")
     warnings: List[str] = Field(default_factory=list, description="List of any extraction warnings or anomalies")
     error: Optional[str] = Field(default=None, description="Error message if parsing or validation failed")
-

@@ -91,7 +91,15 @@ def prepare_transactions(
             .fillna("Uncategorized")
             .astype(str)
             .str.strip()
-            .replace({"": "Uncategorized", "nan": "Uncategorized", "None": "Uncategorized"})
+            .replace(
+                {
+                    "": "Uncategorized",
+                    "nan": "Uncategorized",
+                    "None": "Uncategorized",
+                    "Unknown": "Uncategorized",
+                    "unknown": "Uncategorized",
+                }
+            )
         )
     else:
         clean_df["category"] = "Uncategorized"
@@ -101,20 +109,35 @@ def prepare_transactions(
         clean_df["transaction_type"] = (
             clean_df["transaction_type"].fillna("unknown").astype(str).str.strip().str.lower()
         )
+        clean_df["transaction_type"] = clean_df["transaction_type"].replace(
+            {"debit": "expense", "credit": "income"}
+        )
     else:
         clean_df["transaction_type"] = "unknown"
+    clean_df = clean_df[
+        clean_df["transaction_type"].isin({"income", "expense", "transfer", "unknown"})
+    ].copy()
 
-    # 3. Ensure amount is numeric and positive
+    # 3. Reject malformed, non-finite, zero, and negative amounts instead of
+    # turning them into zero or silently reversing their financial meaning.
     if "amount" in clean_df.columns:
-        clean_df["amount"] = pd.to_numeric(clean_df["amount"], errors="coerce").fillna(0.0)
-        clean_df["amount"] = clean_df["amount"].abs()
+        numeric_amount = pd.to_numeric(clean_df["amount"], errors="coerce")
+        valid_amount = np.isfinite(numeric_amount) & (numeric_amount > 0)
+        clean_df = clean_df.loc[valid_amount].copy()
+        clean_df["amount"] = numeric_amount.loc[valid_amount].astype(float)
     else:
-        clean_df["amount"] = 0.0
+        clean_df = clean_df.iloc[0:0].copy()
+        clean_df["amount"] = pd.Series(dtype=float)
 
-    # 4. Currency handling: default LKR, resolve mixed currencies
+    # 4. Preserve explicit unknown currency rather than relabeling it as LKR.
     if "currency" in clean_df.columns:
         clean_df["currency"] = (
-            clean_df["currency"].fillna("LKR").astype(str).str.strip().str.upper()
+            clean_df["currency"]
+            .fillna("UNKNOWN")
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .replace({"": "UNKNOWN", "NAN": "UNKNOWN", "NONE": "UNKNOWN"})
         )
     else:
         clean_df["currency"] = "LKR"
@@ -136,13 +159,13 @@ def prepare_transactions(
         clean_df["transaction_date"] = pd.to_datetime(
             clean_df["transaction_date"], errors="coerce"
         )
-        # Drop rows with unparseable dates if any
         clean_df = clean_df.dropna(subset=["transaction_date"])
         clean_df["year_month"] = clean_df["transaction_date"].dt.strftime("%Y-%m")
         clean_df["transaction_date"] = clean_df["transaction_date"].dt.strftime("%Y-%m-%d")
     else:
-        clean_df["year_month"] = "Unknown"
-        clean_df["transaction_date"] = "Unknown"
+        clean_df = clean_df.iloc[0:0].copy()
+        clean_df["year_month"] = pd.Series(dtype=str)
+        clean_df["transaction_date"] = pd.Series(dtype=str)
 
     # 6. Apply optional date filters
     if month:
@@ -408,4 +431,3 @@ def calculate_analytics(
             "total_records_analyzed": summary.get("total_transaction_count", 0),
         },
     }
-

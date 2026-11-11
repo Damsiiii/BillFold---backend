@@ -11,6 +11,7 @@ import re
 import pandas as pd
 
 from models.transaction import Transaction, ExtractionResult
+from app.services.categorization import categorize
 from services.transaction_normalizer import (
     normalize_date,
     normalize_description,
@@ -170,7 +171,12 @@ class CSVParser:
             )
 
         # Check global statement currency from headers or metadata
-        global_currency = self._detect_global_currency(raw_text[:1000], col_mapping, df)
+        statement_header_text = "\n".join(
+            raw_text.splitlines()[: header_row_idx + 1]
+        )
+        global_currency = self._detect_global_currency(
+            statement_header_text, col_mapping, df
+        )
 
         date_col = col_mapping["date"]
 
@@ -221,7 +227,7 @@ class CSVParser:
                 debit_val=raw_debit,
                 credit_val=raw_credit,
                 amount_val=raw_amt,
-                type_hint=raw_type
+                type_hint=raw_type or normalized_desc,
             )
 
             if amount is None:
@@ -247,9 +253,19 @@ class CSVParser:
                 cat_text = str(row.get(cat_col)).strip()
                 if cat_text and cat_text.lower() not in {"nan", "none", "null"}:
                     category = cat_text
+            if category.casefold() in {"unknown", "uncategorized"}:
+                category = categorize(normalized_desc, txn_type)
 
             # Create canonical transaction
-            txn_id = generate_transaction_id(filename, int(row_idx), normalized_dt, normalized_desc, amount)
+            txn_id = generate_transaction_id(
+                filename,
+                int(row_idx),
+                normalized_dt,
+                normalized_desc,
+                amount,
+                txn_type,
+                resolved_currency,
+            )
 
             txn = Transaction(
                 transaction_id=txn_id,

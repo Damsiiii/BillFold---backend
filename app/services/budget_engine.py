@@ -40,6 +40,7 @@ ESSENTIAL_CATEGORIES = {
     "food",
     "transport",
     "health",
+    "healthcare",
     "education",
 }
 
@@ -335,4 +336,3 @@ def detect_overspending(
         },
         "categories": categories_detail,
     }
-

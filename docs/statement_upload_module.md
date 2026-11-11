@@ -9,24 +9,27 @@
 
 The **Statement Upload & Data Extraction** module provides a secure, deterministic, and standardized ingestion pipeline for bank statement files in the **BillFold** personal finance management system.
 
-The module allows users to upload raw bank statements in **PDF**, **CSV**, and **Excel (.xlsx)** formats, validates their security and structural integrity, extracts financial transactions, normalizes dates, amounts, and descriptions, and returns standardized transaction records strictly conforming to the project's canonical eight-field transaction schema via a FastAPI REST endpoint (`POST /api/upload`).
+The module allows users to upload raw bank statements in **PDF**, **CSV**, **Excel (.xls/.xlsx)**, **JPG/JPEG**, and **PNG** formats, validates their security and structural integrity, extracts financial transactions, normalizes dates, amounts, and descriptions, and returns standardized transaction records strictly conforming to the project's canonical eight-field transaction schema via a FastAPI REST endpoint (`POST /api/upload`).
 
 ---
 
 ## 2. Responsibilities & Strict Scope
 
-### Within Scope (Tharanya's Responsibility)
-1. **File Upload & Validation**: Secure ingestion of PDF, CSV, and XLSX statements, verifying magic bytes, extensions, size constraints ($\le 15$ MB), and path traversal prevention.
+### Within Scope
+1. **File Upload & Validation**: Secure ingestion of PDF, CSV, XLS, XLSX, JPG/JPEG, and PNG statements, verifying MIME type when provided, signatures or image integrity, extensions, size constraints ($\le 15$ MB), and path traversal prevention.
 2. **Format-Specific Extraction**:
    - **PDF**: Table extraction and fallback text-line parsing using `pdfplumber` and `pypdf`.
    - **CSV**: Delimiter detection (`,`, `;`, `\t`, `|`), encoding auto-detection (`utf-8-sig`, `utf-8`, `latin-1`, `cp1252`), and header mapping.
    - **Excel (.xlsx)**: Modern Excel workbook extraction via `openpyxl`, formula evaluation (`data_only=True`), and serial date normalization.
-3. **Transaction Normalization**:
+   - **Excel (.xls)**: Legacy Excel workbook extraction via `xlrd`, with date-cell normalization.
+   - **JPG/JPEG/PNG**: Image integrity and dimensions are validated before PaddleOCR extracts positioned statement text. Low-confidence OCR regions are excluded, and malformed rows are not emitted as transactions.
+3. **Transaction Normalization and Rule-Based Categorization**:
    - Strict calendar date enforcement (`YYYY-MM-DD`).
    - Deterministic debit and credit direction mapping (`income`, `expense`).
-   - Positive transaction amounts (`amount >= 0.0`).
-   - Currency symbol/code detection (`USD`, `EUR`, `GBP`, `LKR`, `INR`, etc.).
-   - Deterministic `transaction_id` hashing.
+   - Positive transaction amounts (`amount > 0.0`); zero, malformed, and non-finite amounts are rejected.
+   - Currency code and unambiguous symbol detection, normalized to ISO 4217 codes; ambiguous symbols and absent currencies remain unset.
+   - Description-based categories for common income, food, transport, utility, shopping, healthcare, transfer, and fee transactions, while preserving explicit statement categories.
+   - Deterministic `transaction_id` fingerprinting from source file, date, normalized description, amount, direction, currency, and row occurrence.
    - Automated exclusion of opening/closing balance rows and summary totals.
 4. **Standardized API Delivery**: Returning `ExtractionResult` payloads with consistent schema across success (`200 OK`) and error states (`400`, `413`, `422`, `500`).
 
@@ -52,12 +55,14 @@ flowchart TD
     C -- "Validation Passed" --> D{"Format Dispatcher"}
     
     D -- ".csv" --> E["services/csv_parser.py"]
-    D -- ".xlsx" --> F["services/excel_parser.py"]
+    D -- ".xls / .xlsx" --> F["services/excel_parser.py"]
     D -- ".pdf" --> G["services/pdf_parser.py"]
+    D -- ".jpg / .jpeg / .png" --> J["services/image_parser.py (PaddleOCR)"]
     
     E --> H["services/transaction_normalizer.py"]
     F --> H
     G --> H
+    J --> H
     
     H -- "Normalize Dates, Amounts, Types, Exclude Balances" --> I["models/transaction.py (Transaction)"]
     
@@ -74,13 +79,13 @@ flowchart TD
 ```
 
 ### PDF Compatibility and Extraction
-PDF processing is page-oriented and does not depend on a particular filename, bank, or fixed table layout. It tries detected tables, positioned text, then line-based text; duplicate interpretations from lower-priority strategies do not override structured debit/credit values. Header mappings are retained per table/page, including continuation pages. Rotated page content is normalized before extraction.
+PDF processing is page-oriented and does not depend on a particular filename, bank, or fixed table layout. It tries detected tables, positioned text, then line-based text; duplicate interpretations from lower-priority strategies do not override structured debit/credit values. Header mappings are retained per table/page, including continuation pages. For text-only rows, a trailing running balance is kept separate from the transaction amount; descriptions ending in digits are preserved, and rows with ambiguous debit/credit columns are rejected rather than guessing. Explicit signed amounts and DR/CR suffixes take precedence over description keywords.
 
-Pages containing images with little extractable text are sent through PaddleOCR, including scanned pages mixed with digital pages. OCR uses the page's actual geometry, caps render resolution for large pages, and enables document/text orientation handling. `requirements.txt` includes the PDF parsing libraries. Install `requirements-ocr.txt` to enable scanned-PDF OCR; without that optional runtime, scanned uploads fail clearly rather than being reported as successfully extracted.
+Pages containing images with little extractable text are sent through PaddleOCR, including scanned pages mixed with digital pages. JPG/JPEG/PNG uploads are decoded and OCRed directly; low-confidence OCR regions are skipped. `requirements.txt` includes PDF and image decoding libraries. Install `requirements-ocr.txt` to enable OCR for scanned PDFs and statement images; without that optional runtime, OCR uploads fail clearly rather than being reported as successfully extracted.
 
-The integrated `POST /upload-statement` endpoint queues scanned PDFs and returns `202 Accepted`; clients can poll `GET /upload-status/{job_id}`. OCR runs in an isolated child process with a fixed timeout so a malformed or stalled document is marked failed and does not leave the worker stuck.
+The integrated `POST /upload-statement` endpoint queues scanned PDFs and JPG/JPEG/PNG images and returns `202 Accepted`; clients can poll `GET /upload-status/{job_id}`. OCR runs in an isolated child process with a fixed timeout so a malformed or stalled document is marked failed and does not leave the worker stuck.
 
-The integrated upload endpoint records a SHA-256 fingerprint of each accepted file, unique per user. Re-uploading identical bytes returns the existing result or job rather than persisting the statement again. Failed uploads can be retried. Transaction rows are not deduplicated by date, description, or amount, so identical-looking transactions in a statement or in a distinct upload remain separate records. Unknown currency remains unset.
+The integrated upload endpoint records a SHA-256 fingerprint of each accepted file, unique per user. Re-uploading identical bytes returns the existing result or job rather than persisting the statement again. Failed uploads can be retried. Transaction rows are not deduplicated by date, description, or amount, so identical-looking transactions in a statement or in a distinct upload remain separate records. Unknown currency remains unset; analytics do not silently relabel it as LKR.
 
 ---
 
@@ -90,13 +95,13 @@ The integrated upload endpoint records a SHA-256 fingerprint of each accepted fi
 | :--- | :--- | :--- | :--- |
 | **PDF** | `.pdf` | Header: `b"%PDF"` | `services/pdf_parser.py` |
 | **CSV** | `.csv` | Plain text (`utf-8-sig`, `utf-8`, `latin-1`, `cp1252`) | `services/csv_parser.py` |
+| **Excel** | `.xls` | Legacy OLE compound document | `services/excel_parser.py` (`xlrd`) |
 | **Excel** | `.xlsx` | ZIP archive: `b"PK\x03\x04"` containing `xl/` parts | `services/excel_parser.py` |
+| **JPEG** | `.jpg`, `.jpeg` | Validated JPEG image | `services/image_parser.py` |
+| **PNG** | `.png` | Validated PNG image | `services/image_parser.py` |
 
-### Legacy `.xls` Policy
-Legacy binary Excel files (`.xls`, Microsoft Compound Document format `\xd0\xcf\x11\xe0`) are **explicitly unsupported**.
-- **Rationale**: `xlrd` is not installed or maintained for security reasons in modern Python 3.13 environments, and modern banking institutions provide `.xlsx` or `.csv`.
-- **Handling**: Both `file_validator.py` and `excel_parser.py` intercept `.xls` uploads and return HTTP 400 with actionable conversion instructions:
-  `"Legacy Excel format (.xls) is not supported. Please convert the statement to modern Excel format (.xlsx) or export as CSV/PDF."`
+### Legacy `.xls` Support
+Legacy binary Excel files are verified with `xlrd` and parsed through the same transaction normalization and categorization path as `.xlsx`. The runtime dependency is declared in `requirements.txt`; malformed or encrypted workbooks fail validation or extraction without persisting transactions.
 
 ### Security & Integrity Rules (`services/file_validator.py`)
 1. **15 MB File Size Limit**: Probes stream length via `seek(0, os.SEEK_END)` and `tell()` before reading payload bytes, rejecting oversized files with **HTTP 413** without allocating memory.
@@ -132,9 +137,11 @@ class Transaction(BaseModel):
    - Rejects calendar-impossible dates (e.g., `31/02/2026`, non-leap February 29).
    - Resolves ambiguous dates (e.g., `05/06/2024`) by statement-level convention inference with optional caller override (`dayfirst=True/False`).
 2. **Amounts & Directions**:
-   - `amount` is always non-negative (`amount = abs(val)`).
+   - `amount` is always non-negative (`amount = abs(val)`), and non-finite monetary values are rejected.
    - Expense rows (debits, negative values, `(100.00)`, `100.00 DR`) are mapped to `transaction_type="expense"`.
    - Income rows (credits, positive values, `100.00 CR`) are mapped to `transaction_type="income"`.
+   - A row with non-zero debit and credit values simultaneously is rejected instead of selecting or combining one column.
+   - Missing categories are inferred from the description where possible; explicit statement categories are retained.
 3. **Summary & Balance Row Filtering**:
    - Rows describing account state rather than transactions (`Opening Balance`, `Closing Balance`, `Balance Brought Forward`, `Total Debits`, `Grand Total`) are excluded automatically via `is_summary_or_balance_row()`.
 4. **Running Balance Attribute (`exclude=True`)**:
@@ -151,12 +158,12 @@ Uploads and extracts transactions from a bank statement file.
 #### Parameters
 | Parameter | In | Type | Required | Description |
 | :--- | :--- | :--- | :--- | :--- |
-| `file` | `formData` | `UploadFile` | Yes | Statement file (`.pdf`, `.csv`, `.xlsx`, $\le 15$ MB) |
+| `file` | `formData` | `UploadFile` | Yes | Statement file (`.pdf`, `.csv`, `.xls`, `.xlsx`, `.jpg`, `.jpeg`, `.png`, $\le 15$ MB) |
 | `dayfirst` | `query` | `boolean` | No | Explicit date convention override (`true` for DD/MM, `false` for MM/DD) |
 
 #### HTTP Response Status Codes
 - `200 OK`: Successful statement parsing and transaction extraction.
-- `400 Bad Request`: Validation failure (empty file, unsupported format, legacy `.xls`, invalid signature, malicious filename).
+- `400 Bad Request`: Validation failure (empty file, unsupported format, mismatched MIME type, invalid signature, malicious filename).
 - `413 Payload Too Large`: Uploaded file exceeds 15 MB.
 - `422 Unprocessable Content`: Structurally valid file whose statement content cannot be parsed (e.g., scanned PDF without OCR, password-protected PDF, corrupt table structure).
 - `500 Internal Server Error`: Unhandled server exception (returns sanitized message without exposing stack traces).
@@ -180,7 +187,7 @@ Uploads and extracts transactions from a bank statement file.
       "amount": 85.50,
       "currency": null,
       "transaction_type": "expense",
-      "category": "Unknown",
+      "category": "Food",
       "source_dataset": "january_statement.csv"
     },
     {
@@ -190,7 +197,7 @@ Uploads and extracts transactions from a bank statement file.
       "amount": 3500.00,
       "currency": "USD",
       "transaction_type": "income",
-      "category": "Unknown",
+      "category": "Salary",
       "source_dataset": "january_statement.csv"
     }
   ],
@@ -199,20 +206,7 @@ Uploads and extracts transactions from a bank statement file.
 }
 ```
 
-### B. Legacy `.xls` Upload (`400 Bad Request`)
-```json
-{
-  "success": false,
-  "filename": "statement.xls",
-  "file_type": "unknown",
-  "total_transactions": 0,
-  "transactions": [],
-  "warnings": [],
-  "error": "Legacy Excel format (.xls) is not supported. Please convert the statement to modern Excel format (.xlsx) or export as CSV/PDF."
-}
-```
-
-### C. File Exceeds 15 MB (`413 Payload Too Large`)
+### B. File Exceeds 15 MB (`413 Payload Too Large`)
 ```json
 {
   "success": false,
@@ -334,4 +328,4 @@ Parser tests use synthetic digital tables with different headers, column orders,
 
 1. **OCR Runtime**: Scanned-page extraction requires the optional PaddleOCR/PaddlePaddle dependencies in `requirements-ocr.txt`. OCR initialization or page failures are reported explicitly, and asynchronous OCR jobs time out instead of remaining in `processing`.
 2. **Password Protection**: Encrypted PDFs must be unlocked by the user before upload. Decryption in-memory without a user-provided password is intentionally not attempted to preserve document security.
-3. **Legacy `.xls`**: Users must convert old `.xls` spreadsheets to modern `.xlsx` or export as CSV before uploading.
+3. **Legacy Excel parsing**: `.xls` support depends on the declared `xlrd` package; `.xlsx` continues to use `openpyxl`.

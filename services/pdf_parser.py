@@ -21,6 +21,7 @@ import pdfplumber
 import pypdf
 
 from models.transaction import Transaction, ExtractionResult
+from app.services.categorization import categorize
 from services.transaction_normalizer import (
     normalize_date,
     normalize_description,
@@ -28,6 +29,8 @@ from services.transaction_normalizer import (
     parse_numeric_amount,
     generate_transaction_id,
     extract_currency,
+    extract_statement_currency,
+    correct_dates_from_leading_descriptions,
     infer_date_convention,
     is_summary_or_balance_row,
 )
@@ -274,18 +277,25 @@ class PDFParser:
                     )
 
             # Detect statement currency
-            global_currency = extract_currency(full_text[:2000])
+            global_currency = extract_statement_currency(full_text)
 
             # Attempt extraction:
             # 1. Try table-based extraction across pages
-            transactions, table_warnings = self._extract_from_tables(
+            transactions, table_warnings, table_pages = self._extract_from_tables(
                 pdf, filename, global_currency, dayfirst
             )
 
-            # Use coordinates for unruled tables and varied column positions.
+            # Structured table rows are authoritative for their pages. Running
+            # fallback parsers on those pages can reinterpret reference numbers
+            # or balances as separate transactions.
+            fallback_page_indexes = [
+                page_index
+                for page_index in range(len(pdf.pages))
+                if page_index not in table_pages
+            ]
             positioned_words = [
-                page.extract_words(x_tolerance=2, y_tolerance=3)
-                for page in pdf.pages
+                pdf.pages[page_index].extract_words(x_tolerance=2, y_tolerance=3)
+                for page_index in fallback_page_indexes
             ]
             positioned_transactions, positioned_warnings = (
                 self._extract_from_positioned_words(
@@ -293,7 +303,10 @@ class PDFParser:
                 )
             )
             line_transactions, line_warnings = self._extract_from_text(
-                all_text_chunks, filename, global_currency, dayfirst
+                [all_text_chunks[index] for index in fallback_page_indexes],
+                filename,
+                global_currency,
+                dayfirst,
             )
             transactions = self._merge_transactions(
                 transactions, positioned_transactions, line_transactions
@@ -321,6 +334,7 @@ class PDFParser:
                         "was still processed."
                     )
 
+        correct_dates_from_leading_descriptions(transactions, dayfirst=dayfirst)
         if not transactions:
             warnings.append("No valid transaction records could be extracted from this PDF statement.")
 
@@ -437,7 +451,7 @@ class PDFParser:
         filename: str,
         global_currency: Optional[str],
         dayfirst_override: Optional[bool]
-    ) -> Tuple[List[Transaction], List[str]]:
+    ) -> Tuple[List[Transaction], List[str], set[int]]:
         """
         Extracts transactions from table structures detected by pdfplumber.
         """
@@ -445,9 +459,9 @@ class PDFParser:
         warnings: List[str] = []
 
         active_col_mapping: Optional[Dict[str, int]] = None
-        all_table_data_rows: List[Tuple[List[Any], Dict[str, int]]] = []
+        all_table_data_rows: List[Tuple[int, List[Any], Dict[str, int]]] = []
 
-        for page in pdf.pages:
+        for page_index, page in enumerate(pdf.pages):
             try:
                 found_tables = page.extract_tables() or []
             except Exception:
@@ -489,15 +503,17 @@ class PDFParser:
                         continue
 
                     if active_col_mapping:
-                        all_table_data_rows.append((row, active_col_mapping.copy()))
+                        all_table_data_rows.append(
+                            (page_index, row, active_col_mapping.copy())
+                        )
 
         if not active_col_mapping or not all_table_data_rows:
-            return [], warnings
+            return [], warnings, set()
 
         # Infer date convention across table rows
         raw_dates = [
             row[mapping["date"]]
-            for row, mapping in all_table_data_rows
+            for _, row, mapping in all_table_data_rows
             if len(row) > mapping["date"] and row[mapping["date"]]
         ]
 
@@ -509,8 +525,9 @@ class PDFParser:
         warnings.extend(date_warnings)
 
         skipped_rows = 0
+        extracted_pages: set[int] = set()
 
-        for row_idx, (row, col_mapping) in enumerate(all_table_data_rows):
+        for row_idx, (page_index, row, col_mapping) in enumerate(all_table_data_rows):
             def get_cell(idx: Optional[int]) -> Any:
                 if idx is not None and 0 <= idx < len(row):
                     return row[idx]
@@ -547,7 +564,9 @@ class PDFParser:
                 debit_val=raw_debit,
                 credit_val=raw_credit,
                 amount_val=raw_amt,
-                type_hint=str(raw_type) if raw_type is not None else None
+                type_hint=(
+                    str(raw_type) if raw_type is not None else normalized_desc
+                ),
             )
 
             if amount is None:
@@ -573,9 +592,17 @@ class PDFParser:
                 cat_text = str(raw_cat).strip()
                 if cat_text and cat_text.lower() not in {"nan", "none", "null"}:
                     category = cat_text
+            if category.casefold() in {"unknown", "uncategorized"}:
+                category = categorize(normalized_desc, txn_type)
 
             txn_id = generate_transaction_id(
-                filename, row_idx, normalized_dt, normalized_desc, amount
+                filename,
+                row_idx,
+                normalized_dt,
+                normalized_desc,
+                amount,
+                txn_type,
+                resolved_currency,
             )
 
             txn = Transaction(
@@ -590,11 +617,12 @@ class PDFParser:
                 balance=resolved_balance
             )
             transactions.append(txn)
+            extracted_pages.add(page_index)
 
         if skipped_rows > 0:
             warnings.append(f"Skipped {skipped_rows} non-transaction or malformed table row(s).")
 
-        return transactions, warnings
+        return transactions, warnings, extracted_pages
 
     def _has_transaction_headers(self, row: List[Any]) -> bool:
         mapping, _ = self._score_headers(row)
@@ -803,7 +831,7 @@ class PDFParser:
                 debit_val=values.get("debit"),
                 credit_val=values.get("credit"),
                 amount_val=values.get("amount"),
-                type_hint=values.get("type"),
+                type_hint=values.get("type") or description,
             )
             if amount is None:
                 continue
@@ -814,6 +842,8 @@ class PDFParser:
                 or global_currency
             )
             category = values.get("category") or "Unknown"
+            if category.casefold() in {"unknown", "uncategorized"}:
+                category = categorize(description, transaction_type)
             transactions.append(
                 Transaction(
                     transaction_id=generate_transaction_id(
@@ -822,6 +852,8 @@ class PDFParser:
                         normalized_date,
                         description,
                         amount,
+                        transaction_type,
+                        currency,
                     ),
                     transaction_date=normalized_date,
                     description=description,
@@ -858,19 +890,41 @@ class PDFParser:
                     all_lines.append(stripped)
 
         # First pass: collect raw candidate transaction lines
-        raw_candidates: List[Tuple[str, str, List[str]]] = []
+        raw_candidates: List[Tuple[str, str, List[str], Dict[str, int]]] = []
         date_samples: List[str] = []
         pending_line: Optional[str] = None
         incomplete_rows = 0
+        text_header_mapping: Dict[str, int] = {}
 
         for line in all_lines:
-            parsed_line = self._parse_transaction_line(line)
+            header_mapping, header_score = self._score_headers(line.split())
+            if (
+                header_score >= 2
+                and "date" in header_mapping
+                and any(
+                    column in header_mapping
+                    for column in ("amount", "debit", "credit")
+                )
+            ):
+                text_header_mapping = header_mapping
+                continue
+
+            max_numeric_fields = (
+                3
+                if {"debit", "credit", "balance"}.issubset(text_header_mapping)
+                else 2
+            )
+            parsed_line = self._parse_transaction_line(
+                line, max_numeric_fields=max_numeric_fields
+            )
             if parsed_line:
                 if pending_line is not None:
                     incomplete_rows += 1
                     pending_line = None
                 raw_dt, desc, amounts = parsed_line
-                raw_candidates.append((raw_dt, desc, amounts))
+                raw_candidates.append(
+                    (raw_dt, desc, amounts, text_header_mapping.copy())
+                )
                 date_samples.append(raw_dt)
                 continue
 
@@ -882,10 +936,14 @@ class PDFParser:
 
             if pending_line is not None:
                 pending_line = f"{pending_line} {line}"
-                parsed_line = self._parse_transaction_line(pending_line)
+                parsed_line = self._parse_transaction_line(
+                    pending_line, max_numeric_fields=max_numeric_fields
+                )
                 if parsed_line:
                     raw_dt, desc, amounts = parsed_line
-                    raw_candidates.append((raw_dt, desc, amounts))
+                    raw_candidates.append(
+                        (raw_dt, desc, amounts, text_header_mapping.copy())
+                    )
                     date_samples.append(raw_dt)
                     pending_line = None
 
@@ -909,56 +967,150 @@ class PDFParser:
 
         skipped_rows = incomplete_rows
 
-        for row_idx, (raw_dt, desc, amounts) in enumerate(raw_candidates):
+        previous_balance: Optional[float] = None
+        for row_idx, (raw_dt, desc, amounts, header_mapping) in enumerate(raw_candidates):
             normalized_dt = normalize_date(raw_dt, dayfirst=resolved_dayfirst)
             if not normalized_dt:
                 skipped_rows += 1
                 continue
 
             normalized_desc = normalize_description(desc)
+            has_balance_column = "balance" in header_mapping
+            row_balance = None
+            if len(amounts) >= 2:
+                row_balance, _, _ = parse_numeric_amount(amounts[-1])
+
             if is_summary_or_balance_row(normalized_desc):
-                skipped_rows += 1
+                if re.search(
+                    r"\b(?:opening|beginning|initial|starting)\s+bal(?:ance)?\b",
+                    normalized_desc,
+                    re.IGNORECASE,
+                ):
+                    if row_balance is None and amounts:
+                        row_balance, _, _ = parse_numeric_amount(amounts[-1])
+                    if row_balance is not None:
+                        previous_balance = row_balance
                 continue
 
             # Analyze amounts
-            # If 2 numbers: first is amount, second is balance
-            # If 3 numbers: first is debit, second is credit, third is balance
-            # If 1 number: first is amount
             debit_val = None
             credit_val = None
             amount_val = None
             balance_val = None
 
-            if len(amounts) == 1:
+            has_debit_column = "debit" in header_mapping
+            has_credit_column = "credit" in header_mapping
+            if has_debit_column and has_credit_column and len(amounts) >= 3:
+                debit_val, credit_val = amounts[0], amounts[1]
+                balance_val = amounts[-1] if has_balance_column else None
+            elif has_debit_column != has_credit_column:
+                if len(amounts) >= 2:
+                    if has_debit_column:
+                        debit_val = amounts[0]
+                    else:
+                        credit_val = amounts[0]
+                    balance_val = amounts[-1] if has_balance_column else None
+                elif amounts and not has_balance_column:
+                    if has_debit_column:
+                        debit_val = amounts[0]
+                    else:
+                        credit_val = amounts[0]
+                else:
+                    skipped_rows += 1
+                    continue
+            elif "amount" in header_mapping:
+                if amounts and not (has_balance_column and len(amounts) == 1):
+                    amount_val = amounts[0]
+                    balance_val = amounts[-1] if len(amounts) >= 2 else None
+                elif amounts:
+                    skipped_rows += 1
+                    continue
+            elif len(amounts) == 1:
                 amount_val = amounts[0]
             elif len(amounts) == 2:
-                amount_val = amounts[0]
-                balance_val = amounts[1]
+                amount_val, balance_val = amounts
             elif len(amounts) >= 3:
-                debit_val = amounts[0]
-                credit_val = amounts[1]
-                balance_val = amounts[2]
+                debit_val, credit_val = amounts[0], amounts[1]
+                balance_val = amounts[-1]
+
+            if (
+                has_debit_column
+                and has_credit_column
+                and len(amounts) == 2
+            ):
+                transaction_value, _, _ = parse_numeric_amount(amounts[0])
+                direction = None
+                if previous_balance is not None and row_balance is not None:
+                    balance_change = round(row_balance - previous_balance, 2)
+                    if transaction_value is not None and math.isclose(
+                        abs(balance_change),
+                        abs(transaction_value),
+                        abs_tol=0.02,
+                    ):
+                        direction = "expense" if balance_change < 0 else "income"
+                if direction == "expense":
+                    debit_val = amounts[0]
+                elif direction == "income":
+                    credit_val = amounts[0]
+                elif transaction_value is not None and transaction_value < 0:
+                    amount_val = amounts[0]
+                else:
+                    skipped_rows += 1
+                    continue
+            elif (
+                not header_mapping
+                and len(amounts) == 2
+                and previous_balance is not None
+                and row_balance is not None
+            ):
+                transaction_value, _, _ = parse_numeric_amount(amounts[0])
+                balance_change = round(row_balance - previous_balance, 2)
+                if (
+                    transaction_value is not None
+                    and transaction_value >= 0
+                    and math.isclose(
+                        abs(balance_change),
+                        abs(transaction_value),
+                        abs_tol=0.02,
+                    )
+                ):
+                    if balance_change < 0:
+                        debit_val = amounts[0]
+                    elif balance_change > 0:
+                        credit_val = amounts[0]
+                    amount_val = None
 
             amount, txn_type, row_curr = determine_amount_and_type(
                 debit_val=debit_val,
                 credit_val=credit_val,
-                amount_val=amount_val
+                amount_val=amount_val,
+                type_hint=normalized_desc,
             )
 
             if amount is None:
                 skipped_rows += 1
                 continue
 
-            resolved_currency = row_curr or global_currency
+            resolved_currency = row_curr or extract_currency(desc) or global_currency
 
             resolved_balance = None
             if balance_val:
                 bal_num, _, _ = parse_numeric_amount(balance_val)
                 if bal_num is not None:
                     resolved_balance = round(bal_num, 2)
+            elif has_balance_column and row_balance is not None:
+                resolved_balance = round(row_balance, 2)
+            if row_balance is not None:
+                previous_balance = row_balance
 
             txn_id = generate_transaction_id(
-                filename, row_idx, normalized_dt, normalized_desc, amount
+                filename,
+                row_idx,
+                normalized_dt,
+                normalized_desc,
+                amount,
+                txn_type,
+                resolved_currency,
             )
 
             txn = Transaction(
@@ -968,7 +1120,7 @@ class PDFParser:
                 amount=amount,
                 currency=resolved_currency,
                 transaction_type=txn_type,
-                category="Unknown",
+                category=categorize(normalized_desc, txn_type),
                 source_dataset=filename,
                 balance=resolved_balance
             )
@@ -979,7 +1131,9 @@ class PDFParser:
 
         return transactions, warnings
 
-    def _parse_transaction_line(self, line: str) -> Optional[Tuple[str, str, List[str]]]:
+    def _parse_transaction_line(
+        self, line: str, max_numeric_fields: int = 2
+    ) -> Optional[Tuple[str, str, List[str]]]:
         """
         Parses a single text line that begins with a date followed by description and amounts.
         Returns (raw_date_str, description_str, list_of_amount_strings) or None.
@@ -1004,6 +1158,8 @@ class PDFParser:
 
         # Extract numeric amounts from right to left
         for token in reversed(tokens):
+            if len(amounts) >= max_numeric_fields:
+                break
             clean_tok = token.strip(",;")
             if clean_tok.upper() in {"CR", "DR", "DB"}:
                 pending_suffix = clean_tok.upper()
@@ -1313,7 +1469,7 @@ class PDFParser:
                 "recognized_character_count": len(recognized_text),
             },
         )
-        currency = extract_currency(recognized_text[:2000])
+        currency = extract_statement_currency(recognized_text)
         parsing_started = time.monotonic()
         _record_ocr_stage("transaction_parsing_started")
         logger.info(

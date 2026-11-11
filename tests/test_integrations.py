@@ -1,16 +1,23 @@
+import io
+import hashlib
+import json
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
+from PIL import Image
 from app.main import app
 from app.api import integrations
 from app.api.integrations import registry
 from app.database import database as database_module
 from app.database.database import Base
 from app.models.transaction import Transaction
+from app.models.upload_claim import StatementUploadClaim
 from app.models.upload_job import UploadJob
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -174,6 +181,235 @@ def test_member1_upload_extracts_and_saves_transactions_for_user(sqlite_database
     assert saved_transaction["amount"] == 85.5
     bob_transactions = client.get("/transactions?user_id=bob").json()["data"]
     assert bob_transactions["count"] == 1
+
+
+def test_member1_image_upload_extracts_and_saves_transactions(
+    sqlite_database, monkeypatch
+):
+    image = Image.new("RGB", (500, 250), color="white")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="JPEG")
+
+    def fake_run_extraction(
+        image_bytes, filename, progress, progress_lock, file_type="pdf"
+    ):
+        transactions = [
+            {
+                "transaction_id": f"ocr-tx-{row_index}",
+                "transaction_date": f"2026-01-{row_index + 5:02d}",
+                "description": f"Market {row_index + 1}",
+                "amount": 85.5,
+                "currency": "USD",
+                "transaction_type": "expense",
+                "category": "Food",
+                "source_dataset": filename,
+            }
+            for row_index in range(6)
+        ]
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": True,
+                "filename": filename,
+                "file_type": file_type,
+                "total_transactions": len(transactions),
+                "transactions": transactions,
+                "warnings": [],
+                "error": None,
+            },
+        )
+
+    monkeypatch.setattr(
+        integrations, "_run_isolated_extraction", fake_run_extraction
+    )
+    response = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("market.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+    retry = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("market.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+
+    assert response.status_code == 202
+    assert retry.status_code == 202
+    job_id = response.json()["data"]["job_id"]
+    assert retry.json()["data"]["job_id"] == job_id
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        status_response = client.get(
+            f"/upload-status/{job_id}?user_id=alice"
+        ).json()
+        if status_response["status"] in {"completed", "failed"}:
+            break
+        time.sleep(0.01)
+
+    assert status_response["status"] == "completed", status_response
+    result = status_response["data"]["result"]
+    assert result["total_transactions"] == 6
+    assert all(
+        transaction["currency"] == "USD"
+        for transaction in result["transactions"]
+    )
+
+    alice_transactions = client.get("/transactions?user_id=alice").json()["data"]
+    assert alice_transactions["count"] == 8
+    saved = [
+        row
+        for row in alice_transactions["transactions"]
+        if row["description"].startswith("Market ")
+    ]
+    assert len(saved) == 6
+    assert all(row["type"] == "debit" for row in saved)
+    assert all(row["amount"] == 85.5 for row in saved)
+    assert all(row["currency"] == "USD" for row in saved)
+
+    completed_retry = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("market.jpg", image_bytes.getvalue(), "image/jpeg")},
+    )
+    assert completed_retry.status_code == 200
+    assert completed_retry.json()["data"]["transactions"] == result["transactions"]
+
+
+def test_reupload_returns_corrected_dates_from_cached_image_result(
+    sqlite_database, monkeypatch
+):
+    image = Image.new("RGB", (100, 60), color="white")
+    image_bytes = io.BytesIO()
+    image.save(image_bytes, format="PNG")
+    content = image_bytes.getvalue()
+    content_hash = hashlib.sha256(content).hexdigest()
+    job_id = "cached-image-date-job"
+    stale_dates = [
+        "2021-01-06",
+        "2021-01-06",
+        "2021-03-06",
+        "2021-04-06",
+        "2021-07-06",
+        "2021-08-06",
+        "2021-09-06",
+    ]
+    expected_dates = [
+        "2021-05-31",
+        "2021-06-01",
+        "2021-06-03",
+        "2021-06-04",
+        "2021-06-07",
+        "2021-06-08",
+        "2021-06-09",
+    ]
+    result = {
+        "success": True,
+        "filename": "output.png",
+        "file_type": "png",
+        "total_transactions": len(expected_dates),
+        "transactions": [
+            {
+                "transaction_id": f"ocr-{index}",
+                "transaction_date": stale_date,
+                "description": f"{description_date} Purchase {index}",
+                "amount": 10.0,
+                "currency": None,
+                "transaction_type": "expense",
+                "category": "Other",
+                "source_dataset": "output.png",
+            }
+            for index, (stale_date, description_date) in enumerate(
+                zip(stale_dates, (
+                    "05-31-2021",
+                    "06-01-2021",
+                    "06-03-2021",
+                    "06-04-2021",
+                    "06-07-2021",
+                    "06-08-2021",
+                    "06-09-2021",
+                ))
+            )
+        ],
+        "warnings": [],
+        "error": None,
+    }
+    db = integrations.SessionLocal()
+    db.add(
+        UploadJob(
+            id=job_id,
+            user_id="alice",
+            filename="output.png",
+            content_hash=content_hash,
+            status="completed",
+            result_json=json.dumps(result),
+        )
+    )
+    db.add(
+        StatementUploadClaim(
+            user_id="alice", content_hash=content_hash, job_id=job_id
+        )
+    )
+    db.commit()
+    db.close()
+    monkeypatch.setattr(
+        integrations,
+        "_run_isolated_extraction",
+        lambda *args, **kwargs: pytest.fail("cached upload should not be parsed"),
+    )
+
+    response = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("output.png", content, "image/png")},
+    )
+
+    assert response.status_code == 200
+    assert [
+        transaction["transaction_date"]
+        for transaction in response.json()["data"]["transactions"]
+    ] == expected_dates
+    assert client.get("/transactions?user_id=alice").json()["data"]["count"] == 2
+    status_result = client.get(
+        f"/upload-status/{job_id}?user_id=alice"
+    ).json()["data"]["result"]
+    assert [
+        transaction["transaction_date"]
+        for transaction in status_result["transactions"]
+    ] == expected_dates
+
+
+def test_retry_after_response_timeout_does_not_persist_twice(
+    sqlite_database, monkeypatch
+):
+    content = b"Date,Description,Amount\n2026-03-01,Bus,-2.50\n"
+    persist = integrations._extract_and_save
+    first_call = True
+
+    def persist_then_timeout(file, user_id, job_id=None):
+        nonlocal first_call
+        response = persist(file, user_id, job_id)
+        if first_call:
+            first_call = False
+            from fastapi import HTTPException
+
+            raise HTTPException(status_code=504, detail="Synthetic response timeout.")
+        return response
+
+    monkeypatch.setattr(integrations, "_extract_and_save", persist_then_timeout)
+    first = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("timeout.csv", content, "text/csv")},
+    )
+
+    assert first.status_code == 504
+    rows = client.get("/transactions?user_id=alice").json()["data"]["transactions"]
+    assert sum(row["description"] == "Bus" for row in rows) == 1
+
+    monkeypatch.setattr(integrations, "_extract_and_save", persist)
+    retry = client.post(
+        "/upload-statement?user_id=alice",
+        files={"file": ("timeout.csv", content, "text/csv")},
+    )
+
+    assert retry.status_code == 200
+    rows = client.get("/transactions?user_id=alice").json()["data"]["transactions"]
+    assert sum(row["description"] == "Bus" for row in rows) == 1
 
 
 @pytest.mark.parametrize(
@@ -392,12 +628,13 @@ def test_reuploading_same_pdf_is_idempotent_per_user(sqlite_database, monkeypatc
         [["2026-02-01", "Coffee", "-4.50"]],
     )
     uploaded_file = ("same-statement.pdf", pdf_content, "application/pdf")
+    renamed_retry = ("renamed-copy.pdf", pdf_content, "application/pdf")
 
     first = client.post(
         "/upload-statement?user_id=alice", files={"file": uploaded_file}
     )
     retry = client.post(
-        "/upload-statement?user_id=alice", files={"file": uploaded_file}
+        "/upload-statement?user_id=alice", files={"file": renamed_retry}
     )
     other_user = client.post(
         "/upload-statement?user_id=bob", files={"file": uploaded_file}
@@ -447,7 +684,7 @@ def test_failed_upload_retry_can_be_reprocessed(sqlite_database, monkeypatch):
     )
     responses = iter((failure, success))
     monkeypatch.setattr(
-        integrations, "extract_statement", lambda _file: next(responses)
+        integrations, "extract_statement", lambda _file, **kwargs: next(responses)
     )
 
     first = client.post(
@@ -519,6 +756,44 @@ def test_upload_idempotency_schema_upgrade_preserves_existing_jobs(
             "FROM statement_upload_jobs WHERE id = 'legacy-job'"
         ).one()
     assert row == ("legacy-job", "failed", None, 0)
+    engine.dispose()
+
+
+def test_upload_claim_migration_backfills_duplicate_hashes_without_deleting_jobs(
+    monkeypatch, tmp_path
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'duplicate_jobs.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE statement_upload_jobs ("
+            "id VARCHAR PRIMARY KEY, user_id VARCHAR NOT NULL, "
+            "filename VARCHAR NOT NULL, status VARCHAR NOT NULL, "
+            "result_json TEXT, error TEXT, created_at DATETIME NOT NULL, "
+            "updated_at DATETIME NOT NULL, content_hash VARCHAR(64), "
+            "is_async BOOLEAN NOT NULL DEFAULT 0)"
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO statement_upload_jobs "
+            "(id, user_id, filename, status, created_at, updated_at, content_hash) "
+            "VALUES "
+            "('old-failed', 'alice', 'old.pdf', 'failed', '2026-01-01', "
+            "'2026-01-01', 'same-hash'), "
+            "('old-completed', 'alice', 'old-copy.pdf', 'completed', "
+            "'2026-01-02', '2026-01-02', 'same-hash')"
+        )
+    monkeypatch.setattr(database_module, "engine", engine)
+
+    database_module.init_db()
+
+    with engine.connect() as connection:
+        jobs = connection.exec_driver_sql(
+            "SELECT id FROM statement_upload_jobs ORDER BY id"
+        ).fetchall()
+        claims = connection.exec_driver_sql(
+            "SELECT user_id, content_hash, job_id FROM statement_upload_claims"
+        ).fetchall()
+    assert jobs == [("old-completed",), ("old-failed",)]
+    assert claims == [("alice", "same-hash", "old-completed")]
     engine.dispose()
 
 

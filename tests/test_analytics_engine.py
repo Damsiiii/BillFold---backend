@@ -329,6 +329,93 @@ def test_edge_case_mixed_currency():
     assert summary_usd["total_income"] == 500.0
 
 
+def test_invalid_transactions_are_excluded_from_analytics_and_recommendations():
+    from app.services.budget_engine import generate_suggested_budgets
+
+    df = pd.DataFrame(
+        [
+            {
+                "transaction_date": "2026-03-01",
+                "description": "Salary",
+                "amount": 200.0,
+                "currency": "LKR",
+                "transaction_type": "credit",
+                "category": "Salary",
+            },
+            {
+                "transaction_date": "2026-03-02",
+                "description": "Groceries",
+                "amount": 100.0,
+                "currency": "LKR",
+                "transaction_type": "expense",
+                "category": "Food",
+            },
+            {
+                "transaction_date": "2026-03-03",
+                "description": "Negative stored amount",
+                "amount": -900.0,
+                "currency": "LKR",
+                "transaction_type": "expense",
+                "category": "Shopping",
+            },
+            {
+                "transaction_date": "2026-03-04",
+                "description": "Malformed amount",
+                "amount": "not money",
+                "currency": "LKR",
+                "transaction_type": "expense",
+                "category": "Shopping",
+            },
+            {
+                "transaction_date": "2026-03-05",
+                "description": "Zero amount",
+                "amount": 0.0,
+                "currency": "LKR",
+                "transaction_type": "expense",
+                "category": "Shopping",
+            },
+            {
+                "transaction_date": "not a date",
+                "description": "Invalid date",
+                "amount": 300.0,
+                "currency": "LKR",
+                "transaction_type": "expense",
+                "category": "Shopping",
+            },
+            {
+                "transaction_date": "2026-03-06",
+                "description": "Invalid type",
+                "amount": 500.0,
+                "currency": "LKR",
+                "transaction_type": "refund-ish",
+                "category": "Shopping",
+            },
+        ]
+    )
+
+    summary = compute_financial_summary(df)
+    categories = compute_category_spending(df)
+    budgets = generate_suggested_budgets(df, target_month="2026-04")
+
+    assert summary["total_income"] == 200.0
+    assert summary["total_expenses"] == 100.0
+    assert summary["net_savings"] == 100.0
+    assert summary["savings_rate"] == 0.5
+    assert summary["total_transaction_count"] == 2
+    assert categories == [
+        {
+            "category": "Food",
+            "total_amount": 100.0,
+            "transaction_count": 1,
+            "average_amount": 100.0,
+            "percentage_share": 100.0,
+            "currency": "LKR",
+        }
+    ]
+    assert budgets["total_suggested_budget"] == 100.0
+    assert [item["category"] for item in budgets["category_budgets"]] == ["Food"]
+
+
 def test_filters_by_month_and_dates(mock_df: pd.DataFrame):
     """Test filtering by month, start_date, and end_date."""
     # Month filter

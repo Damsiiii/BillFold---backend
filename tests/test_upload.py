@@ -6,11 +6,17 @@ schema consistency, and file closure.
 """
 import io
 import json
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 import pytest
 from fastapi import UploadFile
+import numpy as np
+from PIL import Image
 
 from api.upload import upload_statement
+from models.transaction import ExtractionResult
+from services.image_parser import parse_image
 from tests.test_parsers import (
     create_test_xlsx,
     create_test_table_pdf,
@@ -23,6 +29,13 @@ from tests.test_parsers import (
 def make_upload_file(data: bytes, filename: str) -> UploadFile:
     """Helper to construct a FastAPI UploadFile from bytes and filename."""
     return UploadFile(filename=filename, file=io.BytesIO(data))
+
+
+def create_test_image(format_name: str) -> bytes:
+    image = Image.new("RGB", (500, 100), color="white")
+    output = io.BytesIO()
+    image.save(output, format=format_name)
+    return output.getvalue()
 
 
 class TestUploadAPI:
@@ -84,6 +97,64 @@ class TestUploadAPI:
         assert body["transactions"][0]["transaction_type"] == "expense"
         assert body["transactions"][1]["transaction_type"] == "income"
 
+    def test_successful_legacy_xls_upload(self, monkeypatch):
+        class FakeSheet:
+            name = "Transactions"
+            rows = [
+                ["Date", "Description", "Debit", "Credit", "Balance"],
+                ["2024-02-01", "Coffee Shop", 4.5, None, 995.5],
+            ]
+            nrows = len(rows)
+
+            def row(self, index):
+                return [
+                    SimpleNamespace(
+                        ctype=0 if value is None else (2 if isinstance(value, float) else 1),
+                        value=value,
+                    )
+                    for value in self.rows[index]
+                ]
+
+        class FakeWorkbook:
+            datemode = 0
+            nsheets = 1
+
+            def __init__(self):
+                self.sheet = FakeSheet()
+
+            def release_resources(self):
+                pass
+
+            def sheet_names(self):
+                return [self.sheet.name]
+
+            def sheet_by_name(self, name):
+                assert name == self.sheet.name
+                return self.sheet
+
+        fake_xlrd = SimpleNamespace(
+            XL_CELL_EMPTY=0,
+            XL_CELL_BLANK=6,
+            XL_CELL_ERROR=5,
+            XL_CELL_DATE=3,
+            xldate=SimpleNamespace(xldate_as_datetime=lambda value, mode: value),
+            open_workbook=lambda **kwargs: FakeWorkbook(),
+        )
+        monkeypatch.setitem(sys.modules, "xlrd", fake_xlrd)
+
+        file = make_upload_file(
+            b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1synthetic-xls",
+            "legacy_statement.xls",
+        )
+        response = upload_statement(file)
+        body = json.loads(response.body.decode("utf-8"))
+
+        assert response.status_code == 200
+        assert body["total_transactions"] == 1
+        assert body["transactions"][0]["description"] == "Coffee Shop"
+        assert body["transactions"][0]["amount"] == 4.5
+        assert body["transactions"][0]["transaction_type"] == "expense"
+
     def test_successful_pdf_upload(self):
         """Test successful PDF statement upload returns 200 OK and canonical transactions."""
         headers = ["Date", "Description", "Debit", "Credit", "Balance"]
@@ -105,6 +176,207 @@ class TestUploadAPI:
         assert body["transactions"][0]["amount"] == 45.00
         assert body["transactions"][1]["amount"] == 2000.00
 
+    @pytest.mark.parametrize(
+        ("extension", "image_format"),
+        [("jpg", "JPEG"), ("jpeg", "JPEG"), ("png", "PNG")],
+    )
+    def test_statement_image_extensions_are_validated_and_dispatched(
+        self, extension, image_format
+    ):
+        image_bytes = create_test_image(image_format)
+        file = make_upload_file(image_bytes, f"statement.{extension}")
+        parser_result = ExtractionResult(
+            success=True,
+            filename=f"statement.{extension}",
+            file_type=extension,
+            total_transactions=0,
+            transactions=[],
+            warnings=[],
+            error=None,
+        )
+
+        with patch("api.upload.parse_image", return_value=parser_result) as image_parser:
+            response = upload_statement(file)
+
+        assert response.status_code == 200
+        image_parser.assert_called_once()
+
+    def test_image_ocr_extracts_transaction_and_explicit_currency(self, monkeypatch):
+        image_bytes = create_test_image("PNG")
+        recognized = [
+            ("Date", 0, 40, 10, 20),
+            ("Description", 70, 145, 10, 20),
+            ("Debit", 180, 220, 10, 20),
+            ("Credit", 250, 295, 10, 20),
+            ("Balance", 320, 380, 10, 20),
+            ("Currency", 410, 470, 10, 20),
+            ("2026-03-01", 0, 55, 40, 50),
+            ("Mobile", 75, 110, 40, 50),
+            ("Reload", 115, 145, 40, 50),
+            ("25.50", 180, 220, 40, 50),
+            ("950.00", 320, 380, 40, 50),
+            ("AED", 420, 450, 40, 50),
+        ]
+        result_data = {
+            "rec_texts": [item[0] for item in recognized],
+            "rec_boxes": np.array([
+                [item[1], item[3], item[2], item[4]] for item in recognized
+            ]),
+            "rec_scores": np.array([0.99] * len(recognized)),
+        }
+
+        class FakeOCR:
+            def predict(self, image):
+                assert image.shape == (100, 500, 3)
+                return [SimpleNamespace(json={"res": result_data})]
+
+        monkeypatch.setattr("services.image_parser._get_ocr_engine", FakeOCR)
+
+        result = parse_image(
+            io.BytesIO(image_bytes),
+            filename="statement.png",
+            file_type="png",
+        )
+
+        assert result.success is True
+        assert result.total_transactions == 1
+        transaction = result.transactions[0]
+        assert transaction.transaction_date == "2026-03-01"
+        assert transaction.description == "Mobile Reload"
+        assert transaction.amount == 25.50
+        assert transaction.transaction_type == "expense"
+        assert transaction.currency == "AED"
+
+    def test_image_ocr_prefers_consistent_leading_description_dates(self, monkeypatch):
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (700, 430), color="white").save(image_bytes, format="PNG")
+
+        rows = [
+            ("05-31-2021", "2021-01-06"),
+            ("06-01-2021", "2021-01-06"),
+            ("06-03-2021", "2021-02-06"),
+            ("06-04-2021", "2021-07-06"),
+            ("06-07-2021", "2021-08-06"),
+            ("06-08-2021", "2021-10-06"),
+            ("06-09-2021", "2021-11-06"),
+        ]
+        recognized = [
+            ("Date", 0, 60, 10, 22),
+            ("Description", 100, 300, 10, 22),
+            ("Debit", 350, 400, 10, 22),
+            ("Credit", 450, 500, 10, 22),
+            ("Balance", 550, 630, 10, 22),
+        ]
+        for index, (description_date, extracted_date) in enumerate(rows):
+            y = 40 + index * 35
+            recognized.extend([
+                (extracted_date, 0, 80, y, y + 14),
+                (f"{description_date} Purchase {index}", 100, 310, y, y + 14),
+                ("10.00", 350, 400, y, y + 14),
+                (f"{990 - index * 10:.2f}", 550, 630, y, y + 14),
+            ])
+
+        recognized.extend([
+            ("2021-06-12", 0, 80, 295, 309),
+            ("Ordinary purchase", 100, 310, 295, 309),
+            ("10.00", 350, 400, 295, 309),
+            ("920.00", 550, 630, 295, 309),
+            ("2021-05-31", 0, 80, 330, 344),
+            ("05-31-2021 Consistent date", 100, 310, 330, 344),
+            ("10.00", 350, 400, 330, 344),
+            ("910.00", 550, 630, 330, 344),
+        ])
+        result_data = {
+            "rec_texts": [item[0] for item in recognized],
+            "rec_boxes": np.array([
+                [item[1], item[3], item[2], item[4]] for item in recognized
+            ]),
+            "rec_scores": np.array([0.99] * len(recognized)),
+        }
+
+        class FakeOCR:
+            def predict(self, image):
+                return [SimpleNamespace(json={"res": result_data})]
+
+        monkeypatch.setattr("services.image_parser._get_ocr_engine", FakeOCR)
+        result = parse_image(
+            image_bytes.getvalue(), "date-regression.png", "png"
+        )
+
+        assert result.success is True
+        assert result.total_transactions == 9
+        assert [
+            transaction.transaction_date
+            for transaction in result.transactions[:7]
+        ] == [
+            "2021-05-31",
+            "2021-06-01",
+            "2021-06-03",
+            "2021-06-04",
+            "2021-06-07",
+            "2021-06-08",
+            "2021-06-09",
+        ]
+        assert result.transactions[7].transaction_date == "2021-06-12"
+        assert result.transactions[8].transaction_date == "2021-05-31"
+        assert result.transactions[0].description.startswith("05-31-2021")
+        assert all(transaction.currency is None for transaction in result.transactions)
+
+        response = upload_statement(
+            make_upload_file(image_bytes.getvalue(), "date-regression.png"),
+            dayfirst=None,
+        )
+        body = json.loads(response.body.decode("utf-8"))
+        assert response.status_code == 200
+        assert [
+            transaction["transaction_date"]
+            for transaction in body["transactions"][:7]
+        ] == [
+            "2021-05-31",
+            "2021-06-01",
+            "2021-06-03",
+            "2021-06-04",
+            "2021-06-07",
+            "2021-06-08",
+            "2021-06-09",
+        ]
+
+    def test_image_with_low_confidence_ocr_does_not_create_transactions(
+        self, monkeypatch
+    ):
+        image_bytes = create_test_image("PNG")
+        result_data = {
+            "rec_texts": ["2026-03-01", "Unknown purchase", "10.00"],
+            "rec_boxes": [
+                [0, 10, 70, 20],
+                [80, 10, 180, 20],
+                [200, 10, 240, 20],
+            ],
+            "rec_scores": [0.3, 0.4, 0.2],
+        }
+
+        class FakeOCR:
+            def predict(self, image):
+                return [SimpleNamespace(json={"res": result_data})]
+
+        monkeypatch.setattr("services.image_parser._get_ocr_engine", FakeOCR)
+        file = make_upload_file(image_bytes, "blurry.png")
+        response = upload_statement(file)
+
+        assert response.status_code == 422
+        body = json.loads(response.body.decode("utf-8"))
+        assert body["transactions"] == []
+        assert any("low-confidence" in warning for warning in body["warnings"])
+
+    def test_malformed_image_is_rejected_without_ocr(self):
+        file = make_upload_file(b"\x89PNG\r\n\x1a\nnot-an-image", "broken.png")
+        response = upload_statement(file)
+
+        assert response.status_code == 400
+        body = json.loads(response.body.decode("utf-8"))
+        assert body["transactions"] == []
+        assert "unreadable" in body["error"].lower()
+
     # 2. Unsupported file types
     def test_unsupported_extension_rejected_400(self):
         """Test upload with unsupported extension returns 400 Bad Request."""
@@ -117,8 +389,8 @@ class TestUploadAPI:
         assert body["total_transactions"] == 0
         assert "unsupported" in body["error"].lower()
 
-    def test_legacy_xls_rejected_400_with_conversion_guidance(self):
-        """Test legacy .xls upload returns 400 Bad Request with conversion guidance."""
+    def test_corrupted_legacy_xls_rejected_400(self):
+        """Test malformed legacy XLS content returns a useful validation error."""
         file = make_upload_file(b"FakeLegacyXlsData", "statement.xls")
         response = upload_statement(file)
 
@@ -126,8 +398,7 @@ class TestUploadAPI:
         body = json.loads(response.body.decode("utf-8"))
         assert body["success"] is False
         assert body["total_transactions"] == 0
-        assert "not supported" in body["error"].lower()
-        assert ".xlsx" in body["error"]
+        assert "legacy excel" in body["error"].lower()
 
     # 3. Empty and oversized files
     def test_empty_file_rejected_400(self):
@@ -440,5 +711,3 @@ class TestEndToEndWorkflow:
         assert body["transactions"][0]["transaction_type"] == "expense"
         assert body["transactions"][1]["amount"] == 3200.00
         assert body["transactions"][1]["transaction_type"] == "income"
-
-

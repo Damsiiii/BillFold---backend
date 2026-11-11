@@ -6,11 +6,13 @@ with support for multi-sheet workbooks, metadata headers, and diverse statement 
 from typing import Any, Dict, List, Optional, Tuple, Union, BinaryIO
 from pathlib import Path
 import io
+import logging
 import re
 import openpyxl
 import openpyxl.utils.datetime as ox_dt
 
 from models.transaction import Transaction, ExtractionResult
+from app.services.categorization import categorize
 from services.transaction_normalizer import (
     normalize_date,
     normalize_description,
@@ -66,6 +68,54 @@ CATEGORY_KEYWORDS = [
 CURRENCY_KEYWORDS = [
     "currency", "curr", "ccy"
 ]
+logger = logging.getLogger(__name__)
+
+
+class _LegacyXlsWorksheet:
+    def __init__(self, sheet: Any, datemode: int, xlrd_module: Any):
+        self._sheet = sheet
+        self._datemode = datemode
+        self._xlrd = xlrd_module
+
+    def iter_rows(self, max_row: Optional[int] = None, values_only: bool = True):
+        row_count = self._sheet.nrows
+        if max_row is not None:
+            row_count = min(row_count, max_row)
+        for row_idx in range(row_count):
+            values = []
+            for cell in self._sheet.row(row_idx):
+                if cell.ctype in {
+                    self._xlrd.XL_CELL_EMPTY,
+                    self._xlrd.XL_CELL_BLANK,
+                    self._xlrd.XL_CELL_ERROR,
+                }:
+                    values.append(None)
+                elif cell.ctype == self._xlrd.XL_CELL_DATE:
+                    try:
+                        values.append(
+                            self._xlrd.xldate.xldate_as_datetime(
+                                cell.value, self._datemode
+                            )
+                        )
+                    except (OverflowError, TypeError, ValueError):
+                        values.append(None)
+                else:
+                    values.append(cell.value)
+            yield tuple(values)
+
+
+class _LegacyXlsWorkbook:
+    def __init__(self, workbook: Any, xlrd_module: Any):
+        self._workbook = workbook
+        self._xlrd = xlrd_module
+        self.sheetnames = workbook.sheet_names()
+
+    def __getitem__(self, name: str) -> _LegacyXlsWorksheet:
+        return _LegacyXlsWorksheet(
+            self._workbook.sheet_by_name(name),
+            self._workbook.datemode,
+            self._xlrd,
+        )
 
 
 class ExcelParser:
@@ -119,23 +169,31 @@ class ExcelParser:
                 error="Excel file is empty."
             )
 
-        # Check for legacy .xls files
+        # Load the workbook with a format-specific reader.
         is_legacy = filename.lower().endswith(".xls") and not filename.lower().endswith(".xlsx")
+        load_error: Optional[str] = None
         if is_legacy:
-            return ExtractionResult(
-                success=False,
-                filename=filename,
-                file_type="excel",
-                total_transactions=0,
-                transactions=[],
-                warnings=warnings,
-                error="Legacy Excel format (.xls) is not supported. Please convert the statement to modern Excel format (.xlsx)."
-            )
+            try:
+                import xlrd
 
-        # Load workbook with openpyxl
-        try:
-            wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True, read_only=True)
-        except Exception as e:
+                wb = _LegacyXlsWorkbook(
+                    xlrd.open_workbook(file_contents=raw_bytes, on_demand=True),
+                    xlrd,
+                )
+            except ImportError:
+                load_error = "Legacy Excel support is unavailable; install the xlrd dependency."
+            except Exception:
+                load_error = "Invalid or corrupted legacy Excel (.xls) file."
+                logger.exception("Could not load legacy Excel statement %s", filename)
+        else:
+            try:
+                wb = openpyxl.load_workbook(
+                    io.BytesIO(raw_bytes), data_only=True, read_only=True
+                )
+            except Exception as e:
+                load_error = f"Invalid or corrupted Excel file: {str(e)}"
+
+        if load_error:
             return ExtractionResult(
                 success=False,
                 filename=filename,
@@ -143,7 +201,7 @@ class ExcelParser:
                 total_transactions=0,
                 transactions=[],
                 warnings=warnings,
-                error=f"Invalid or corrupted Excel file: {str(e)}"
+                error=load_error,
             )
 
         if not wb.sheetnames:
@@ -230,7 +288,10 @@ class ExcelParser:
 
         # Detect statement-wide currency from metadata rows and header names
         metadata_text = " ".join(
-            str(cell) for r in all_rows[:header_row_idx] for cell in r if cell is not None
+            str(cell)
+            for r in all_rows[: header_row_idx + 1]
+            for cell in r
+            if cell is not None
         )
         global_currency = self._detect_global_currency(metadata_text, best_mapping)
 
@@ -295,7 +356,9 @@ class ExcelParser:
                 debit_val=raw_debit,
                 credit_val=raw_credit,
                 amount_val=raw_amt,
-                type_hint=str(raw_type) if raw_type is not None else None
+                type_hint=(
+                    str(raw_type) if raw_type is not None else normalized_desc
+                ),
             )
 
             if amount is None:
@@ -324,9 +387,17 @@ class ExcelParser:
                 cat_text = str(raw_cat).strip()
                 if cat_text and cat_text.lower() not in {"nan", "none", "null"}:
                     category = cat_text
+            if category.casefold() in {"unknown", "uncategorized"}:
+                category = categorize(normalized_desc, txn_type)
 
             txn_id = generate_transaction_id(
-                filename, row_offset, normalized_dt, normalized_desc, amount
+                filename,
+                row_offset,
+                normalized_dt,
+                normalized_desc,
+                amount,
+                txn_type,
+                resolved_currency,
             )
 
             txn = Transaction(
@@ -479,7 +550,7 @@ class ExcelParser:
 
     def _scan_sheet_for_header(
         self,
-        ws: openpyxl.worksheet.worksheet.Worksheet
+        ws: Any
     ) -> Tuple[Optional[int], Optional[Dict[str, int]], int]:
         """
         Scans top rows of a worksheet to locate the header row.
@@ -509,7 +580,7 @@ class ExcelParser:
 
     def _select_worksheet(
         self,
-        wb: openpyxl.Workbook,
+        wb: Any,
         requested_sheet: Optional[Union[str, int]]
     ) -> Tuple[Optional[str], Optional[Dict[str, int]], Optional[int], Optional[str]]:
         """
@@ -580,4 +651,3 @@ def parse_excel(
     """
     parser = ExcelParser(sheet_name=sheet_name, dayfirst=dayfirst)
     return parser.parse(file_source, filename, sheet_name=sheet_name, dayfirst=dayfirst)
-
