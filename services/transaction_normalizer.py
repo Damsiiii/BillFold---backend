@@ -390,6 +390,13 @@ def extract_currency(text: str) -> Optional[str]:
 def extract_statement_currency(text: str) -> Optional[str]:
     """Return a currency only when statement metadata declares exactly one."""
     declared_currencies = set()
+
+    header_currency_pattern = (
+        rf"\b(?:transaction\s+)?"
+        rf"(?:amount|balance|debit|credit|withdrawal|deposit|fee|charges?)"
+        rf"\s*[\(\[]\s*({CURRENCY_CODE_PATTERN})\s*[\)\]]"
+    )
+
     for line in (text or "").splitlines():
         if re.match(
             r"^\s*(?:\d{4}[/.-]\d{1,2}[/.-]\d{1,2}|"
@@ -399,6 +406,7 @@ def extract_statement_currency(text: str) -> Optional[str]:
             line,
         ):
             continue
+
         declaration = re.match(
             r"^\s*(?:(?:statement|account)\s+)?currency(?:\s+code)?\s*[:=-]\s*(.+?)\s*$",
             line,
@@ -411,21 +419,28 @@ def extract_statement_currency(text: str) -> Optional[str]:
                 line,
                 re.IGNORECASE,
             )
-        if declaration is None:
-            continue
 
-        declared_text = declaration.group(1)
+        if declaration is not None:
+            declared_text = declaration.group(1)
+            declared_currencies.update(
+                match.group(1).upper()
+                for match in re.finditer(
+                    rf"(?<![A-Za-z])({CURRENCY_CODE_PATTERN})(?![A-Za-z])",
+                    declared_text,
+                    re.IGNORECASE,
+                )
+            )
+            named_currency = extract_currency(declared_text)
+            if named_currency:
+                declared_currencies.add(named_currency)
+
+        # Detect explicit financial column declarations such as Amount (USD).
         declared_currencies.update(
             match.group(1).upper()
             for match in re.finditer(
-                rf"(?<![A-Za-z])({CURRENCY_CODE_PATTERN})(?![A-Za-z])",
-                declared_text,
-                re.IGNORECASE,
+                header_currency_pattern, line, re.IGNORECASE
             )
         )
-        named_currency = extract_currency(declared_text)
-        if named_currency:
-            declared_currencies.add(named_currency)
 
     return next(iter(declared_currencies)) if len(declared_currencies) == 1 else None
 
