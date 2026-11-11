@@ -1292,6 +1292,60 @@ class TestPDFParser:
         assert result.transactions[1].category == "Utilities"
         assert result.transactions[2].category == "Shopping"
 
+    def test_pdf_text_columns_extract_fourteen_statement_transactions(self):
+        lines = [
+            "Statement Currency: LKR",
+            "Date Description Debit Credit Balance",
+            "2026-10-01 Opening Balance 125000.00 125000.00",
+            "2026-10-02 Monthly Salary 85000.00 210000.00",
+            "2026-10-03 Keells Supermarket 6450.00 203550.00",
+            "2026-10-03 PickMe Ride 1250.00 202300.00",
+            "2026-10-04 Electricity Bill CEB 4850.00 197450.00",
+            "2026-10-05 Freelance Payment 18500.00 215950.00",
+            "2026-10-06 Fuel Station 5000.00 210950.00",
+            "2026-10-07 Restaurant Lunch 2750.00 208200.00",
+            "2026-10-08 ATM Cash Withdrawal 10000.00 198200.00",
+            "2026-10-09 Mobile Reload 500.00 197700.00",
+            "2026-10-10 Pharmacy Purchase 1850.00 195850.00",
+            "2026-10-11 Internet Bill SLT 3200.00 192650.00",
+            "2026-10-12 Online Shopping 4600.00 188050.00",
+            "2026-10-13 Cash Deposit 7500.00 195550.00",
+            "2026-10-14 Monthly Account Fee 350.00 195200.00",
+            "2026-10-14 Closing Balance 195200.00 195200.00",
+            "Total Credits 111000.00",
+            "Total Debits 40800.00",
+        ]
+        expected = [
+            ("Monthly Salary", 85000.0, "income"),
+            ("Keells Supermarket", 6450.0, "expense"),
+            ("PickMe Ride", 1250.0, "expense"),
+            ("Electricity Bill CEB", 4850.0, "expense"),
+            ("Freelance Payment", 18500.0, "income"),
+            ("Fuel Station", 5000.0, "expense"),
+            ("Restaurant Lunch", 2750.0, "expense"),
+            ("ATM Cash Withdrawal", 10000.0, "expense"),
+            ("Mobile Reload", 500.0, "expense"),
+            ("Pharmacy Purchase", 1850.0, "expense"),
+            ("Internet Bill SLT", 3200.0, "expense"),
+            ("Online Shopping", 4600.0, "expense"),
+            ("Cash Deposit", 7500.0, "income"),
+            ("Monthly Account Fee", 350.0, "expense"),
+        ]
+
+        result = parse_pdf(
+            create_test_text_pdf(lines), filename="fourteen_text_transactions.pdf"
+        )
+
+        assert result.success is True
+        assert result.total_transactions == 14
+        assert [
+            (txn.description, txn.amount, txn.transaction_type)
+            for txn in result.transactions
+        ] == expected
+        assert all(txn.currency == "LKR" for txn in result.transactions)
+        assert result.transactions[0].balance == 210000.0
+        assert result.transactions[-1].balance == 195200.0
+
     def test_pdf_table_with_signed_amounts(self):
         """Test structured table PDF with a single signed Amount column."""
         headers = ["Date", "Description", "Amount", "Balance"]
@@ -1527,6 +1581,50 @@ class TestPDFParser:
             "expense",
             "income",
         ]
+
+    def test_pdf_merge_uses_post_transaction_balance_when_amounts_conflict(self):
+        structured = Transaction(
+            transaction_id="structured",
+            transaction_date="2024-02-01",
+            description="Card payment",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+            balance=90.0,
+        )
+        fallback = structured.model_copy(
+            update={"transaction_id": "fallback", "amount": 90.0}
+        )
+
+        result = PDFParser._merge_transactions([structured], [fallback])
+
+        assert result == [structured]
+
+    def test_pdf_merge_keeps_same_description_with_different_balances(self):
+        first = Transaction(
+            transaction_id="first",
+            transaction_date="2024-02-01",
+            description="Card payment",
+            amount=10.0,
+            currency="USD",
+            transaction_type="expense",
+            category="Unknown",
+            source_dataset="synthetic.pdf",
+            balance=90.0,
+        )
+        second = first.model_copy(
+            update={
+                "transaction_id": "second",
+                "amount": 12.0,
+                "balance": 78.0,
+            }
+        )
+
+        result = PDFParser._merge_transactions([first], [second])
+
+        assert result == [first, second]
 
     @pytest.mark.parametrize("rotation", [90, 180, 270])
     def test_pdf_rotated_page_is_normalized_before_extraction(self, rotation):

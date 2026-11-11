@@ -78,11 +78,16 @@ class _LegacyXlsWorksheet:
         self._datemode = datemode
         self._xlrd = xlrd_module
 
-    def iter_rows(self, max_row: Optional[int] = None, values_only: bool = True):
+    def iter_rows(
+        self,
+        max_row: Optional[int] = None,
+        values_only: bool = True,
+        min_row: int = 1,
+    ):
         row_count = self._sheet.nrows
         if max_row is not None:
             row_count = min(row_count, max_row)
-        for row_idx in range(row_count):
+        for row_idx in range(min_row - 1, row_count):
             values = []
             for cell in self._sheet.row(row_idx):
                 if cell.ctype in {
@@ -233,12 +238,17 @@ class ExcelParser:
                 error=sheet_err
             )
 
-        # Read all rows from the chosen worksheet
+        # Keep only the header metadata and date samples in memory. XLSX files
+        # are opened read-only, so transaction rows can be streamed later.
         ws = wb[chosen_sheet]
-        all_rows: List[List[Any]] = []
         try:
-            for row in ws.iter_rows(values_only=True):
-                all_rows.append(list(row))
+            header_max_row = header_row_idx + 1 if header_row_idx is not None else 1
+            header_rows = [
+                list(row)
+                for row in ws.iter_rows(
+                    max_row=header_max_row, values_only=True
+                )
+            ]
         except Exception as e:
             return ExtractionResult(
                 success=False,
@@ -250,7 +260,7 @@ class ExcelParser:
                 error=f"Error reading rows from worksheet '{chosen_sheet}': {str(e)}"
             )
 
-        if not all_rows:
+        if not header_rows:
             return ExtractionResult(
                 success=False,
                 filename=filename,
@@ -274,9 +284,35 @@ class ExcelParser:
                 error="Could not identify required transaction columns (Date and Amount/Debit/Credit)."
             )
 
-        # Data rows start immediately after the header row
-        data_rows = all_rows[header_row_idx + 1:]
-        if not data_rows:
+        # Detect statement-wide currency from metadata rows and header names
+        metadata_text = "\n".join(
+            " ".join(str(cell) for cell in row if cell is not None)
+            for row in header_rows
+        )
+        global_currency = self._detect_global_currency(metadata_text, best_mapping)
+
+        # Resolve date convention
+        date_col_idx = best_mapping["date"]
+        data_start_row = header_row_idx + 2
+        raw_dates_sample = []
+        data_row_count = 0
+        try:
+            for row in ws.iter_rows(min_row=data_start_row, values_only=True):
+                data_row_count += 1
+                if len(row) > date_col_idx and row[date_col_idx] is not None:
+                    raw_dates_sample.append(row[date_col_idx])
+        except Exception as e:
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="excel",
+                total_transactions=0,
+                transactions=[],
+                warnings=warnings,
+                error=f"Error reading rows from worksheet '{chosen_sheet}': {str(e)}"
+            )
+
+        if data_row_count == 0:
             return ExtractionResult(
                 success=True,
                 filename=filename,
@@ -286,17 +322,6 @@ class ExcelParser:
                 warnings=[f"Worksheet '{chosen_sheet}' contains headers but no transaction rows."],
                 error=None
             )
-
-        # Detect statement-wide currency from metadata rows and header names
-        metadata_text = "\n".join(
-            " ".join(str(cell) for cell in row if cell is not None)
-            for row in all_rows[: header_row_idx + 1]
-        )
-        global_currency = self._detect_global_currency(metadata_text, best_mapping)
-
-        # Resolve date convention
-        date_col_idx = best_mapping["date"]
-        raw_dates_sample = [r[date_col_idx] for r in data_rows if len(r) > date_col_idx and r[date_col_idx] is not None]
 
         resolved_dayfirst, date_warnings = infer_date_convention(
             raw_dates=raw_dates_sample,
@@ -318,7 +343,9 @@ class ExcelParser:
 
         skipped_rows = 0
 
-        for row_offset, row in enumerate(data_rows):
+        for row_offset, row in enumerate(
+            ws.iter_rows(min_row=data_start_row, values_only=True)
+        ):
             # Safe access to cell by index
             def get_cell(idx: Optional[int]) -> Any:
                 if idx is not None and 0 <= idx < len(row):

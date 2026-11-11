@@ -192,19 +192,38 @@ class CSVParser:
 
         # Extract transactions row by row
         transactions: List[Transaction] = []
-        desc_col = col_mapping.get("description")
-        debit_col = col_mapping.get("debit")
-        credit_col = col_mapping.get("credit")
-        amount_col = col_mapping.get("amount")
-        balance_col = col_mapping.get("balance")
-        type_col = col_mapping.get("type")
-        cat_col = col_mapping.get("category")
-        curr_col = col_mapping.get("currency")
+        column_positions = {
+            column: position for position, column in enumerate(df.columns)
+        }
+
+        def position_for(field: str) -> Optional[int]:
+            column = col_mapping.get(field)
+            return column_positions.get(column) if column is not None else None
+
+        date_position = position_for("date")
+        if date_position is None:
+            return ExtractionResult(
+                success=False,
+                filename=filename,
+                file_type="csv",
+                total_transactions=0,
+                transactions=[],
+                warnings=warnings,
+                error="Could not identify the transaction date column.",
+            )
+        desc_position = position_for("description")
+        debit_position = position_for("debit")
+        credit_position = position_for("credit")
+        amount_position = position_for("amount")
+        balance_position = position_for("balance")
+        type_position = position_for("type")
+        category_position = position_for("category")
+        currency_position = position_for("currency")
 
         skipped_rows = 0
 
-        for row_idx, row in df.iterrows():
-            raw_date = row.get(date_col)
+        for row_idx, row in enumerate(df.itertuples(index=False, name=None)):
+            raw_date = row[date_position]
             normalized_dt = normalize_date(raw_date, dayfirst=resolved_dayfirst)
 
             if not normalized_dt:
@@ -212,17 +231,17 @@ class CSVParser:
                 skipped_rows += 1
                 continue
 
-            raw_desc = row.get(desc_col) if desc_col else None
+            raw_desc = row[desc_position] if desc_position is not None else None
             normalized_desc = normalize_description(raw_desc)
 
             if is_summary_or_balance_row(normalized_desc):
                 skipped_rows += 1
                 continue
 
-            raw_debit = row.get(debit_col) if debit_col else None
-            raw_credit = row.get(credit_col) if credit_col else None
-            raw_amt = row.get(amount_col) if amount_col else None
-            raw_type = row.get(type_col) if type_col else None
+            raw_debit = row[debit_position] if debit_position is not None else None
+            raw_credit = row[credit_position] if credit_position is not None else None
+            raw_amt = row[amount_position] if amount_position is not None else None
+            raw_type = row[type_position] if type_position is not None else None
 
             amount, txn_type, row_curr = determine_amount_and_type(
                 debit_val=raw_debit,
@@ -237,21 +256,21 @@ class CSVParser:
 
             # Resolve currency
             explicit_curr = None
-            if curr_col and row.get(curr_col):
-                explicit_curr = extract_currency(str(row.get(curr_col)))
+            if currency_position is not None and row[currency_position]:
+                explicit_curr = extract_currency(str(row[currency_position]))
             resolved_currency = explicit_curr or row_curr or global_currency
 
             # Resolve balance
             resolved_balance = None
-            if balance_col and row.get(balance_col):
-                bal_val, _, _ = parse_numeric_amount(row.get(balance_col))
+            if balance_position is not None and row[balance_position]:
+                bal_val, _, _ = parse_numeric_amount(row[balance_position])
                 if bal_val is not None:
                     resolved_balance = round(bal_val, 2)
 
             # Resolve category
             category = "Unknown"
-            if cat_col and row.get(cat_col):
-                cat_text = str(row.get(cat_col)).strip()
+            if category_position is not None and row[category_position]:
+                cat_text = str(row[category_position]).strip()
                 if cat_text and cat_text.lower() not in {"nan", "none", "null"}:
                     category = cat_text
             if category.casefold() in {"unknown", "uncategorized"}:
@@ -404,7 +423,8 @@ class CSVParser:
 
     def _clean_header_name(self, header: str) -> str:
         """
-        Standardizes a column header name for fuzzy keyword matching.
+        Standardizes column headers for keyword matching.
+        Treats underscores and punctuation as word separators.
         """
         cleaned = re.sub(r"[^\w\s/]", " ", str(header)).strip().lower()
         return re.sub(r"\s+", " ", cleaned)

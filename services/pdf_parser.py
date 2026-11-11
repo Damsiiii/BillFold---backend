@@ -647,6 +647,9 @@ class PDFParser:
         prior_overlap_counts: Counter[
             Tuple[str, str, float, Optional[str]]
         ] = Counter()
+        prior_balance_counts: Counter[
+            Tuple[str, str, Optional[str], float]
+        ] = Counter()
         reference_directions: Dict[
             Tuple[str, str, float, Optional[str]], set[str]
         ] = {}
@@ -656,6 +659,9 @@ class PDFParser:
             ] = Counter()
             current_overlap_counts: Counter[
                 Tuple[str, str, float, Optional[str]]
+            ] = Counter()
+            current_balance_counts: Counter[
+                Tuple[str, str, Optional[str], float]
             ] = Counter()
             current_directions: Dict[
                 Tuple[str, str, float, Optional[str]], set[str]
@@ -672,11 +678,24 @@ class PDFParser:
                 current_group_counts[key] += 1
                 current_overlap_counts[overlap_key] += 1
                 current_directions.setdefault(overlap_key, set()).add(direction)
+                if transaction.balance is not None:
+                    balance_key = (
+                        transaction.transaction_date,
+                        transaction.description.casefold(),
+                        transaction.currency.upper()
+                        if transaction.currency
+                        else None,
+                        round(transaction.balance, 2),
+                    )
+                    current_balance_counts[balance_key] += 1
             processed_counts: Counter[
                 Tuple[str, str, float, str, Optional[str]]
             ] = Counter()
             processed_overlap_counts: Counter[
                 Tuple[str, str, float, Optional[str]]
+            ] = Counter()
+            processed_balance_counts: Counter[
+                Tuple[str, str, Optional[str], float]
             ] = Counter()
             for transaction in group:
                 overlap_key = (
@@ -687,8 +706,20 @@ class PDFParser:
                 )
                 direction = transaction.transaction_type.casefold()
                 key = (*overlap_key[:3], direction, overlap_key[3])
+                balance_key = None
+                if transaction.balance is not None:
+                    balance_key = (
+                        transaction.transaction_date,
+                        transaction.description.casefold(),
+                        transaction.currency.upper()
+                        if transaction.currency
+                        else None,
+                        round(transaction.balance, 2),
+                    )
                 processed_counts[key] += 1
                 processed_overlap_counts[overlap_key] += 1
+                if balance_key is not None:
+                    processed_balance_counts[balance_key] += 1
                 conflicting_strategy_match = (
                     processed_overlap_counts[overlap_key]
                     <= prior_overlap_counts[overlap_key]
@@ -696,12 +727,19 @@ class PDFParser:
                     and len(current_directions[overlap_key]) == 1
                     and direction not in reference_directions[overlap_key]
                 )
-                # Only collapse matching rows across extraction strategies. Keep
-                # repeated occurrences within a strategy and preserve debit/credit
-                # collisions as distinct transaction identities.
+                conflicting_amount_match = (
+                    balance_key is not None
+                    and processed_balance_counts[balance_key]
+                    <= prior_balance_counts[balance_key]
+                    and processed_counts[key] > prior_exact_counts[key]
+                )
+                # Balance provides a cross-strategy row identity when amount
+                # parsing differs. Keep repeated occurrences within a strategy
+                # and preserve collisions without matching balances.
                 if (
                     processed_counts[key] > prior_exact_counts[key]
                     and not conflicting_strategy_match
+                    and not conflicting_amount_match
                 ):
                     merged.append(transaction)
             for key, count in current_group_counts.items():
@@ -709,6 +747,8 @@ class PDFParser:
             for key, count in current_overlap_counts.items():
                 prior_overlap_counts[key] = max(prior_overlap_counts[key], count)
                 reference_directions.setdefault(key, current_directions[key])
+            for key, count in current_balance_counts.items():
+                prior_balance_counts[key] = max(prior_balance_counts[key], count)
         return merged
 
     def _header_column_centers(
