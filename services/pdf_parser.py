@@ -90,14 +90,20 @@ OCR_DPI = 150
 MAX_OCR_PAGE_PIXELS = 8_000_000
 
 
-def _page_needs_ocr(page: Any) -> bool:
+def _page_needs_ocr(page: Any, text: Optional[str] = None) -> bool:
     if not page.images:
         return False
-    try:
-        text = page.extract_text() or ""
-    except Exception:
-        logger.debug("Could not inspect extracted text on a PDF page", exc_info=True)
-        return True
+
+    if text is None:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            logger.debug(
+                "Could not inspect extracted text on a PDF page",
+                exc_info=True,
+            )
+            return True
+
     return len(re.sub(r"\W", "", text)) < 40
 
 
@@ -245,7 +251,7 @@ class PDFParser:
                 for page_number, page in enumerate(pdf.pages, start=1):
                     text = page.extract_text() or ""
                     all_text_chunks.append(text)
-                    if _page_needs_ocr(page):
+                    if _page_needs_ocr(page, text):
                         ocr_pages.append((page_number, page))
             except Exception as exc:
                 return ExtractionResult(
