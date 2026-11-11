@@ -32,21 +32,6 @@ CURRENCY_CODES = {
     "XPF", "YER", "ZAR", "ZMW", "ZWL",
 }
 
-# Only unambiguous symbols map directly to an ISO code. Dollar, yen, and
-# rupee symbols are shared by multiple currencies and require an explicit code.
-CURRENCY_SYMBOL_MAP = {
-    "€": "EUR",
-    "£": "GBP",
-    "₹": "INR",
-    "US$": "USD",
-    "A$": "AUD",
-    "C$": "CAD",
-    "NZ$": "NZD",
-    "S$": "SGD",
-    "HK$": "HKD",
-    "د.إ": "AED",
-}
-
 CURRENCY_CODE_PATTERN = "|".join(sorted(CURRENCY_CODES, key=len, reverse=True))
 
 # Transaction type indicator keywords
@@ -369,7 +354,7 @@ def is_summary_or_balance_row(description: Optional[str]) -> bool:
 
 def extract_currency(text: str) -> Optional[str]:
     """
-    Attempts to identify a currency symbol or ISO 3-letter currency code from a string.
+    Identifies currency only from an ISO code or an unambiguous currency name.
     """
     if not text:
         return None
@@ -399,15 +384,12 @@ def extract_currency(text: str) -> Optional[str]:
         if re.search(pattern, text, re.IGNORECASE):
             return code
 
-    for symbol, code in CURRENCY_SYMBOL_MAP.items():
-        if symbol in text:
-            return code
-
     return None
 
 
 def extract_statement_currency(text: str) -> Optional[str]:
-    """Detect currency from statement context, excluding dated transaction rows."""
+    """Return a currency only when statement metadata declares exactly one."""
+    declared_currencies = set()
     for line in (text or "").splitlines():
         if re.match(
             r"^\s*(?:\d{4}[/.-]\d{1,2}[/.-]\d{1,2}|"
@@ -417,10 +399,35 @@ def extract_statement_currency(text: str) -> Optional[str]:
             line,
         ):
             continue
-        currency = extract_currency(line)
-        if currency:
-            return currency
-    return None
+        declaration = re.match(
+            r"^\s*(?:(?:statement|account)\s+)?currency(?:\s+code)?\s*[:=-]\s*(.+?)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if declaration is None:
+            declaration = re.match(
+                r"^\s*(?:all\s+)?(?:amounts|transactions)\s+"
+                r"(?:are\s+)?(?:denominated\s+)?in\s+(.+?)\s*$",
+                line,
+                re.IGNORECASE,
+            )
+        if declaration is None:
+            continue
+
+        declared_text = declaration.group(1)
+        declared_currencies.update(
+            match.group(1).upper()
+            for match in re.finditer(
+                rf"(?<![A-Za-z])({CURRENCY_CODE_PATTERN})(?![A-Za-z])",
+                declared_text,
+                re.IGNORECASE,
+            )
+        )
+        named_currency = extract_currency(declared_text)
+        if named_currency:
+            declared_currencies.add(named_currency)
+
+    return next(iter(declared_currencies)) if len(declared_currencies) == 1 else None
 
 
 def parse_numeric_amount(raw_val: Any) -> Tuple[Optional[float], Optional[str], Optional[str]]:

@@ -20,6 +20,7 @@ from services.transaction_normalizer import (
     parse_numeric_amount,
     generate_transaction_id,
     extract_currency,
+    extract_statement_currency,
     infer_date_convention,
     is_summary_or_balance_row,
 )
@@ -287,11 +288,9 @@ class ExcelParser:
             )
 
         # Detect statement-wide currency from metadata rows and header names
-        metadata_text = " ".join(
-            str(cell)
-            for r in all_rows[: header_row_idx + 1]
-            for cell in r
-            if cell is not None
+        metadata_text = "\n".join(
+            " ".join(str(cell) for cell in row if cell is not None)
+            for row in all_rows[: header_row_idx + 1]
         )
         global_currency = self._detect_global_currency(metadata_text, best_mapping)
 
@@ -633,11 +632,7 @@ class ExcelParser:
         """
         Checks metadata rows for statement-wide currency codes.
         """
-        if metadata_text:
-            curr = extract_currency(metadata_text)
-            if curr:
-                return curr
-        return None
+        return extract_statement_currency(metadata_text)
 
 
 def parse_excel(

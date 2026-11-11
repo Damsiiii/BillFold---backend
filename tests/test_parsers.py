@@ -8,6 +8,7 @@ import datetime
 import logging
 from types import SimpleNamespace
 import openpyxl
+import pdfplumber
 import pypdf
 import pytest
 
@@ -17,6 +18,7 @@ from services.pdf_parser import PDFParser, is_scanned_pdf, parse_pdf
 from models.transaction import Transaction, ExtractionResult
 from services.transaction_normalizer import (
     extract_currency,
+    extract_statement_currency,
     correct_dates_from_leading_descriptions,
     generate_transaction_id,
     infer_date_convention,
@@ -107,13 +109,11 @@ class TestCSVParser:
             ("JPY 1,234", "JPY"),
             ("LKR 1,234.56", "LKR"),
             ("CHF 1'234.56", "CHF"),
-            ("€ 1.234,56", "EUR"),
-            ("£1,234.56", "GBP"),
-            ("₹1,234.56", "INR"),
-            ("US$1,234.56", "USD"),
-            ("A$1,234.56", "AUD"),
-            ("C$1,234.56", "CAD"),
-            ("د.إ 1,234.56", "AED"),
+            ("US Dollar", "USD"),
+            ("Sri Lankan Rupee", "LKR"),
+            ("Euro", "EUR"),
+            ("British Pound", "GBP"),
+            ("Indian Rupee", "INR"),
             ("United Arab Emirates Dirham", "AED"),
         ],
     )
@@ -123,10 +123,34 @@ class TestCSVParser:
         assert extract_currency(currency_text) == expected
 
     @pytest.mark.parametrize(
-        "ambiguous_currency", ["$1,234.56", "¥1,234", "Rs. 1,234.56"]
+        "currency_symbol",
+        ["$1,234.56", "US$1,234.56", "A$1,234.56", "C$1,234.56",
+         "¥1,234", "₹1,234", "Rs. 1,234.56", "£1,234.56", "€1,234.56"],
     )
-    def test_ambiguous_currency_markers_are_not_guessed(self, ambiguous_currency):
-        assert extract_currency(ambiguous_currency) is None
+    def test_currency_symbols_alone_are_not_used_to_identify_currency(
+        self, currency_symbol
+    ):
+        assert extract_currency(currency_symbol) is None
+
+    @pytest.mark.parametrize(
+        ("statement_text", "expected"),
+        [
+            ("Account currency: USD\n2026-01-01 Store $10", "USD"),
+            ("Currency: Sri Lankan Rupee\n2026-01-01 Store Rs. 10", "LKR"),
+            ("Currency: EUR\n2026-01-01 Store €10", "EUR"),
+            ("Currency: GBP\n2026-01-01 Store £10", "GBP"),
+            ("Currency: INR\n2026-01-01 Store ₹10", "INR"),
+            ("2026-01-01 Store $10", None),
+            ("Currency: $\n2026-01-01 Store $10", None),
+            ("Bank reference USD-12345", None),
+            ("Currency: USD\nStatement Currency: EUR", None),
+            ("Currency: USD / EUR", None),
+        ],
+    )
+    def test_statement_currency_requires_code_or_unambiguous_name(
+        self, statement_text, expected
+    ):
+        assert extract_statement_currency(statement_text) == expected
 
     def test_currency_detection_does_not_treat_common_words_as_currency_codes(self):
         assert extract_currency("All accounts are shown below") is None
@@ -210,6 +234,29 @@ class TestCSVParser:
         assert result.success is True
         assert len(result.transactions) == 1
         assert result.transactions[0].currency is None
+
+    def test_csv_statement_currency_and_transaction_currency_precedence(self):
+        csv_data = (
+            "Currency: USD\n"
+            "Date,Description,Amount,Currency\n"
+            "2026-03-01,Local Store,-12.50,\n"
+            "2026-03-02,Euro Store,-8.00,EUR\n"
+        )
+        result = parse_csv(csv_data.encode(), filename="currency_precedence.csv")
+
+        assert [txn.currency for txn in result.transactions] == ["USD", "EUR"]
+
+    def test_csv_multiple_statement_currencies_do_not_set_a_global_currency(self):
+        csv_data = (
+            "Currency: USD\n"
+            "Statement Currency: EUR\n"
+            "Date,Description,Amount,Currency\n"
+            "2026-03-01,Unspecified Store,-12.50,\n"
+            "2026-03-02,Euro Store,-8.00,EUR\n"
+        )
+        result = parse_csv(csv_data.encode(), filename="mixed_currency.csv")
+
+        assert [txn.currency for txn in result.transactions] == [None, "EUR"]
 
     def test_csv_with_separate_debit_credit_columns(self):
         """Test CSV with separate Debit and Credit columns and currency symbol."""
@@ -754,6 +801,31 @@ class TestExcelParser:
         assert result.transactions[1].transaction_type == "income"
         assert result.transactions[2].transaction_type == "expense"
 
+    def test_xlsx_statement_currency_and_transaction_currency_precedence(self):
+        rows = [
+            ["Currency: USD"],
+            ["Date", "Description", "Amount", "Currency"],
+            [datetime.date(2026, 3, 1), "Local Store", -12.50, None],
+            [datetime.date(2026, 3, 2), "Euro Store", -8.00, "EUR"],
+        ]
+        result = parse_excel(
+            create_test_xlsx(rows), filename="currency_precedence.xlsx"
+        )
+
+        assert [txn.currency for txn in result.transactions] == ["USD", "EUR"]
+
+    def test_xlsx_multiple_statement_currencies_do_not_set_global_currency(self):
+        rows = [
+            ["Currency: USD"],
+            ["Statement Currency: EUR"],
+            ["Date", "Description", "Amount", "Currency"],
+            [datetime.date(2026, 3, 1), "Unspecified Store", -12.50, None],
+            [datetime.date(2026, 3, 2), "Euro Store", -8.00, "EUR"],
+        ]
+        result = parse_excel(create_test_xlsx(rows), filename="mixed_currency.xlsx")
+
+        assert [txn.currency for txn in result.transactions] == [None, "EUR"]
+
     def test_xlsx_multi_sheet_auto_detection(self):
         """Test multi-sheet workbook where the transaction table is on a non-default sheet."""
         overview_rows = [
@@ -1264,6 +1336,67 @@ class TestPDFParser:
         assert result.success is True
         assert result.transactions[0].currency is None
         assert result.transactions[1].currency == "EUR"
+
+    def test_pdf_table_explicit_currency_precedes_statement_currency(self):
+        pdf_bytes = create_test_table_pdf(
+            ["Date", "Description", "Debit", "Credit", "Balance", "Currency"],
+            [
+                ["2026-03-01", "Local Store", "12.50", "", "987.50", ""],
+                ["2026-03-02", "Euro Store", "8.00", "", "979.50", "EUR"],
+            ],
+        )
+        parser = PDFParser()
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            transactions, _, _ = parser._extract_from_tables(
+                pdf, "currency_precedence.pdf", "USD", None
+            )
+
+        assert [txn.currency for txn in transactions] == ["USD", "EUR"]
+
+    def test_pdf_text_fallback_explicit_currency_precedes_statement_currency(self):
+        transactions, warnings = PDFParser()._extract_from_text(
+            [
+                "Date Description Amount Balance",
+                "2026-03-01 Local Store USD 12.50 987.50",
+                "2026-03-02 Euro Store EUR 8.00 979.50",
+            ],
+            "currency_text_fallback.pdf",
+            "USD",
+            None,
+        )
+
+        assert warnings == []
+        assert [txn.currency for txn in transactions] == ["USD", "EUR"]
+
+    def test_pdf_positioned_fallback_explicit_currency_precedes_statement_currency(
+        self,
+    ):
+        words = []
+        rows = [
+            (10, [("Date", 0), ("Description", 100), ("Amount", 250),
+                  ("Currency", 400)]),
+            (30, [("2026-03-01", 0), ("Local", 100), ("12.50", 250)]),
+            (50, [("2026-03-02", 0), ("Euro", 100), ("8.00", 250),
+                  ("EUR", 400)]),
+        ]
+        for top, line in rows:
+            words.extend(
+                {
+                    "text": text,
+                    "x0": left,
+                    "x1": left + max(8, len(text) * 5),
+                    "top": top,
+                    "bottom": top + 10,
+                }
+                for text, left in line
+            )
+
+        transactions, warnings = PDFParser()._extract_from_positioned_words(
+            [words], "currency_positioned.pdf", "USD", None
+        )
+
+        assert warnings == []
+        assert [txn.currency for txn in transactions] == ["USD", "EUR"]
 
     def test_pdf_text_columns_exclude_balance_and_infer_debit_credit(self):
         lines = [
@@ -1854,15 +1987,15 @@ class TestPDFParser:
         assert result.transactions[0].description == "Hardware Store"
         assert result.transactions[0].amount == 45.00
 
-    def test_pdf_currency_symbol_detection(self):
-        """Test extraction of currency symbols in statement text."""
+    def test_pdf_currency_symbol_alone_keeps_currency_null(self):
+        """A symbol without a code or currency name is not currency evidence."""
         lines = ["2024-01-15 British Merchant -\xa375.00 \xa3925.00"]
         pdf_bytes = create_test_text_pdf(lines)
         result = parse_pdf(pdf_bytes, filename="currency_test.pdf")
 
         assert result.success is True
         assert result.total_transactions == 1
-        assert result.transactions[0].currency == "GBP"
+        assert result.transactions[0].currency is None
         assert result.transactions[0].amount == 75.00
 
     def test_pdf_stream_and_path_inputs(self, tmp_path):

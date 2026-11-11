@@ -19,6 +19,7 @@ from services.transaction_normalizer import (
     parse_numeric_amount,
     generate_transaction_id,
     extract_currency,
+    extract_statement_currency,
     infer_date_convention,
     is_summary_or_balance_row,
 )
@@ -499,18 +500,7 @@ class CSVParser:
         """
         Checks metadata rows, header titles, and top cells for statement-wide currency.
         """
-        # Check header text
-        curr = extract_currency(header_text)
-        if curr:
-            return curr
-
-        # Check column names
-        for col in col_mapping.values():
-            curr = extract_currency(col)
-            if curr:
-                return curr
-
-        return None
+        return extract_statement_currency(header_text)
 
 
 def parse_csv(
